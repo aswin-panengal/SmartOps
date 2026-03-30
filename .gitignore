@@ -1,0 +1,18 @@
+# Environments
+venv/
+
+# Secrets and Configs (NEVER UPLOAD)
+.env
+
+# Python Cache (Ignores all those __pycache__ folders)
+__pycache__/
+*.pyc
+*.pyo
+
+# Database Storage (In case Docker binds it locally)
+qdrant_data/
+
+# OS and IDE Files
+.vscode/
+.DS_Store
+Thumbs.db
