@@ -1,0 +1,11 @@
+# keeping away unnecessary files 
+
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.git/
+.gitignore
+*.md
+.pytest_cache/
