@@ -9,10 +9,10 @@ from app.core.config import settings
 # Use Google embeddings instead of local sentence-transformers
 # Free, no RAM cost, better quality
 embedder = GoogleGenerativeAIEmbeddings(
-    model="models/embedding-001",
-    google_api_key=settings.google_api_key
+    model="models/gemini-embedding-001",
+    google_api_key=settings.google_api_key,
+    output_dimensionality=768 # Forces the new 3072 model to fit our 768 Qdrant table
 )
-
 # Initialize Gemini
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash-lite",
