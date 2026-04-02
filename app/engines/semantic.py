@@ -1,18 +1,21 @@
 import io
 import uuid
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
-from langchain_google_genai import ChatGoogleGenerativeAI
 from app.core.config import settings
 
-# Load embedding model once (runs locally, no API cost)
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+# Use Google embeddings instead of local sentence-transformers
+# Free, no RAM cost, better quality
+embedder = GoogleGenerativeAIEmbeddings(
+    model="models/embedding-001",
+    google_api_key=settings.google_api_key
+)
 
 # Initialize Gemini
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+    model="gemini-2.5-flash-lite",
     google_api_key=settings.google_api_key,
     temperature=0
 )
@@ -29,8 +32,8 @@ else:
         port=settings.qdrant_port
     )
 
-COLLECTION_NAME = "smartops_documents"
-VECTOR_SIZE = 384  # all-MiniLM-L6-v2 produces 384-dimensional vectors
+COLLECTION_NAME = "smartops_documents_v2"
+VECTOR_SIZE = 768  # Google embedding-001 produces 768-dimensional vectors
 
 def ensure_collection_exists():
     """
@@ -75,13 +78,6 @@ def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list:
     return chunks
 
 def ingest_pdf(file_bytes: bytes, filename: str) -> dict:
-    """
-    Full ingestion pipeline:
-    1. Extract text from PDF
-    2. Split into chunks
-    3. Convert chunks to vectors
-    4. Store in Qdrant
-    """
     ensure_collection_exists()
 
     # Step 1: Extract text
@@ -92,8 +88,8 @@ def ingest_pdf(file_bytes: bytes, filename: str) -> dict:
     # Step 2: Chunk the text
     chunks = chunk_text(text)
 
-    # Step 3: Convert to vectors
-    vectors = embedder.encode(chunks).tolist()
+    # Step 3: Google embeddings - embed all chunks at once
+    vectors = embedder.embed_documents(chunks)
 
     # Step 4: Store in Qdrant
     points = []
@@ -141,7 +137,7 @@ def query_pdf(question: str, session_id: str = "default") -> dict:
     conversation_context = build_context_for_prompt(session_id)
 
     # Step 2: Vectorize the question
-    question_vector = embedder.encode([question])[0].tolist()
+    question_vector = embedder.embed_query(question)
 
     # Step 3: Find top 4 most relevant chunks
     results = qdrant.query_points(
