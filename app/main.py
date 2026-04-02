@@ -28,12 +28,19 @@ def root():
 @app.get("/health")
 def health_check():
     try:
-        client = QdrantClient(
-            host=settings.qdrant_host,
-            port=settings.qdrant_port
-        )
+        # Connect to either cloud or local Qdrant
+        if settings.qdrant_url:
+            client = QdrantClient(
+                url=settings.qdrant_url,
+                api_key=settings.qdrant_api_key
+            )
+        else:
+            client = QdrantClient(
+                host=settings.qdrant_host,
+                port=settings.qdrant_port
+            )
         client.get_collections()
-        return {
+        return{
             "status": "healthy",
             "qdrant": "connected",
             "app": settings.app_name

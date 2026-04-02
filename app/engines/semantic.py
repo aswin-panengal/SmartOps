@@ -17,11 +17,17 @@ llm = ChatGoogleGenerativeAI(
     temperature=0
 )
 
-# Qdrant client
-qdrant = QdrantClient(
-    host=settings.qdrant_host,
-    port=settings.qdrant_port
-)
+# Smart connection -use cloude else falls back to local 
+if settings.qdrant_url:
+    qdrant = QdrantClient(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_api_key
+    )
+else:
+    qdrant = QdrantClient(
+        host=settings.qdrant_host,
+        port=settings.qdrant_port
+    )
 
 COLLECTION_NAME = "smartops_documents"
 VECTOR_SIZE = 384  # all-MiniLM-L6-v2 produces 384-dimensional vectors
@@ -49,7 +55,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         text += page.extract_text() or ""
     return text
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list:
     """
     Split text into overlapping chunks.
     Overlap ensures we don't lose context at chunk boundaries.
