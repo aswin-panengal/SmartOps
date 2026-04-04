@@ -1,0 +1,59 @@
+{
+  "name": "SmartOps Manual Query",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "81f9349a-5a37-4ef0-915a-68079481c23a",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://smartops:8000/api/webhook/ask",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"question\": \"what are the important policies?\",\n  \"session_id\": \"n8n-manual\",\n  \"source\": \"n8n\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        208,
+        0
+      ],
+      "id": "7c14745a-4d3b-4466-817f-e1802b384a15",
+      "name": "HTTP Request"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "6825bfce-439d-448b-82b7-ba72cc37e3ea",
+  "meta": {
+    "instanceId": "5b633b9ee05e6efb5de6c1297a2a7449abbaa7876770bd8e48c2b3ae1253c876"
+  },
+  "id": "PAd7D7IuJW5hCAHr",
+  "tags": []
+}

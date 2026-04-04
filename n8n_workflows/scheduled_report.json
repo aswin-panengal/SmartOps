@@ -1,0 +1,67 @@
+{
+  "name": "SmartOps Daily Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "id": "31fe72e5-9ab0-467c-a648-abf11439a7d4",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://smartops:8000/api/webhook/ask",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"question\": \"Give me a summary of all key information from the uploaded documents\",\n  \"session_id\": \"daily-report\",\n  \"source\": \"scheduled\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        208,
+        0
+      ],
+      "id": "6e02d0c5-523e-4466-8d79-556b013e2ceb",
+      "name": "HTTP Request"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9037423d-027c-4b8c-8a85-aba1e39e6bfa",
+  "meta": {
+    "instanceId": "5b633b9ee05e6efb5de6c1297a2a7449abbaa7876770bd8e48c2b3ae1253c876"
+  },
+  "id": "zjLxzkNWKIAPXan4",
+  "tags": []
+}

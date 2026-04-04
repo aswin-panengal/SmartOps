@@ -1,5 +1,5 @@
-from fastapi import APIRouter, UploadFile, File, Form
-from typing import Optional 
+from fastapi import APIRouter, UploadFile, File, Form, Request
+from typing import Optional
 from app.engines.analytical import run_analytical_engine
 from app.engines.semantic import ingest_pdf, query_pdf
 from app.memory.session import clear_session
@@ -80,4 +80,41 @@ async def ask(
         "sources": result.get("sources"),
         "session_id": session_id,
         "error": result.get("error")
+    }
+    
+# Webhook endpoint for n8n
+@router.post("/webhook/ask")
+async def webhook_ask(request: Request):
+    """
+    JSON-based endpoint for n8n and external integrations.
+    No file upload — text questions only.
+    """
+    body = await request.json()
+    question = body.get("question", "")
+    session_id = body.get("session_id", "default")
+    source = body.get("source", "webhook")
+
+    if not question:
+        return {"status": "error", "error": "No question provided"}
+
+    result = smartops_graph.invoke({
+        "question": question,
+        "session_id": session_id,
+        "file_bytes": None,
+        "filename": None,
+        "engine": None,
+        "answer": None,
+        "sources": None,
+        "status": None,
+        "error": None
+    })
+
+    return {
+        "status": result.get("status"),
+        "question": question,
+        "engine_used": result.get("engine"),
+        "answer": result.get("answer"),
+        "sources": result.get("sources"),
+        "session_id": session_id,
+        "source": source
     }
