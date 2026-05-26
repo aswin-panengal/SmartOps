@@ -188,5 +188,6 @@ def query_pdf(question: str, session_id: str = "default") -> dict:
         "answer": answer,
         "sources": sources,
         "chunks_used": len(results),
-        "session_id": session_id
+        "session_id": session_id,
+        "contexts": context_chunks
     }
