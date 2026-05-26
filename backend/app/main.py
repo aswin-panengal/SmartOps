@@ -10,13 +10,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# This allows your future Next.js frontend to talk to this backend
+# Secure Production CORS Configuration
+# Only requests from these explicit domains will be permitted by the server
+origins = [
+    "http://localhost:3000",                                        # Local Next.js development server
+    "https://smart-7iqexaluz-aswin-panengals-projects.vercel.app",  # Your unique Vercel preview domain
+    "https://smart-ops-git-main-aswin-panengals-projects.vercel.app" # Your main Vercel branch deployment tracking link
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=origins,
+    allow_credentials=True,  # Safe to set to True now that wildcards are removed
+    allow_methods=["*"],     # Restricts or allows standard methods (POST, GET, OPTIONS, etc.)
+    allow_headers=["*"],     # Allows all standard request headers
 )
 
 # Register all API routes
@@ -41,7 +48,7 @@ def health_check():
                 port=settings.qdrant_port
             )
         client.get_collections()
-        return{
+        return {
             "status": "healthy",
             "qdrant": "connected",
             "app": settings.app_name
