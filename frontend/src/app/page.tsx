@@ -3,7 +3,19 @@
 import ReactMarkdown from "react-markdown";
 import { useState, useRef, useEffect } from "react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Enforce strict runtime verification for production endpoints
+const API_BASE = (() => {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+
+  // If compiling on client side and environment key is dropped, warn clearly
+  if (typeof window !== "undefined") {
+    console.warn("⚠️ Next.js Warning: NEXT_PUBLIC_API_URL variable is missing. Routing to localhost fallback.");
+  }
+
+  return "http://localhost:8000";
+})();
 
 type Engine = "csv" | "pdf" | null;
 
@@ -85,7 +97,9 @@ export default function SmartOpsPage() {
       formData.append("question", userMessage.content);
       formData.append("session_id", sessionId);
 
-      // OPTIMIZATION: Only attach the heavy file payload if it hasn't been sent yet
+      // SMART NETWORK LOCK:
+      // Both PDFs and CSVs are now cached on the backend (in Qdrant and RAM respectively).
+      // We only ever need to send the heavy file payload once per session.
       if (uploadedFile && !isFileIngested) {
         formData.append("file", uploadedFile.file);
       }
@@ -94,7 +108,6 @@ export default function SmartOpsPage() {
         method: "POST",
         body: formData,
       });
-
       // If the request succeeds, lock the file state so it isn't sent on the next turn
       if (res.ok) {
         setIsFileIngested(true);
@@ -137,10 +150,23 @@ export default function SmartOpsPage() {
     }
   };
 
-  const clearChat = () => {
+  const clearChat = async () => {
+    // 1. Wipe frontend UI application component states instantly
     setMessages([]);
     setUploadedFile(null);
-    setIsFileIngested(false); // Reset lock on clear
+    setIsFileIngested(false);
+
+    // 2. Synchronize memory state with the backend server API router
+    if (sessionId) {
+      try {
+        await fetch(`${API_BASE}/api/session/${sessionId}`, {
+          method: "DELETE",
+        });
+        console.log(`Session context ${sessionId} successfully cleared from core memory.`);
+      } catch (err) {
+        console.error("Failed to sync session termination state to the API cluster endpoint:", err);
+      }
+    }
   };
 
   const formatTime = (date: Date) =>
@@ -405,7 +431,6 @@ export default function SmartOpsPage() {
     </div>
   );
 }
-
 
 const styles: Record<string, React.CSSProperties> = {
   root: {

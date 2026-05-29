@@ -8,11 +8,10 @@ from qdrant_client.models import PointStruct, VectorParams, Distance
 from app.core.config import settings
 
 # Use Google embeddings instead of local sentence-transformers
-# Free, no RAM cost, better quality
 embedder = GoogleGenerativeAIEmbeddings(
     model="models/gemini-embedding-001",
     google_api_key=settings.google_api_key,
-    output_dimensionality=768 # Forces the new 3072 model to fit our 768 Qdrant table
+    output_dimensionality=768
 )
 
 # Initialize Gemini
@@ -22,7 +21,7 @@ llm = ChatGoogleGenerativeAI(
     temperature=0
 )
 
-# Smart connection - use cloud else fall back to local 
+# Smart connection
 if settings.qdrant_url:
     qdrant = QdrantClient(
         url=settings.qdrant_url,
@@ -35,10 +34,10 @@ else:
     )
 
 COLLECTION_NAME = "smartops_documents_v2"
-VECTOR_SIZE = 768  # Google embedding-001 produces 768-dimensional vectors
+VECTOR_SIZE = 768
 
 def ensure_collection_exists():
-    """Create the Qdrant collection if it doesn't exist yet."""
+    """Create the Qdrant collection and required indices if it doesn't exist yet."""
     existing = [c.name for c in qdrant.get_collections().collections]
     if COLLECTION_NAME not in existing:
         qdrant.create_collection(
@@ -47,6 +46,12 @@ def ensure_collection_exists():
                 size=VECTOR_SIZE,
                 distance=Distance.COSINE
             )
+        )
+        
+        qdrant.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="session_id",
+            field_schema=models.PayloadSchemaType.KEYWORD
         )
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -70,119 +75,122 @@ def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list:
     return chunks
 
 def ingest_pdf(file_bytes: bytes, filename: str, session_id: str) -> dict:
-    """Extracts, chunks, embeds, and stores PDF data bounded by session context."""
-    ensure_collection_exists()
+    """Extracts, chunks, embeds, and stores PDF data safely."""
+    try:
+        ensure_collection_exists()
 
-    # Step 1: Extract text
-    text = extract_text_from_pdf(file_bytes)
-    if not text.strip():
-        return {"status": "error", "error": "Could not extract text from PDF"}
+        text = extract_text_from_pdf(file_bytes)
+        if not text.strip():
+            return {"status": "error", "error": "Could not extract text from PDF"}
 
-    # Step 2: Chunk the text
-    chunks = chunk_text(text)
+        chunks = chunk_text(text)
+        vectors = embedder.embed_documents(chunks)
 
-    # Step 3: Google embeddings - embed all chunks at once
-    vectors = embedder.embed_documents(chunks)
+        points = []
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            points.append(PointStruct(
+                id=str(uuid.uuid4()),
+                vector=vector,
+                payload={
+                    "text": chunk,
+                    "filename": filename,
+                    "session_id": session_id,
+                    "chunk_index": i
+                }
+            ))
 
-    # Step 4: Store in Qdrant with specific session_id binding
-    points = []
-    for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
-        points.append(PointStruct(
-            id=str(uuid.uuid4()),
-            vector=vector,
-            payload={
-                "text": chunk,
-                "filename": filename,
-                "session_id": session_id,  # Isolates this chunk to the specific user/session
-                "chunk_index": i
-            }
-        ))
+        qdrant.upsert(
+            collection_name=COLLECTION_NAME,
+            points=points
+        )
 
-    qdrant.upsert(
-        collection_name=COLLECTION_NAME,
-        points=points
-    )
-
-    return {
-        "status": "success",
-        "filename": filename,
-        "chunks_stored": len(chunks),
-        "total_characters": len(text)
-    }
+        return {
+            "status": "success",
+            "filename": filename,
+            "chunks_stored": len(chunks),
+            "total_characters": len(text)
+        }
+    except Exception as e:
+        # Prevent ingestion failures from crashing the server
+        return {"status": "error", "error": f"PDF Ingestion Failed: {str(e)}"}
 
 def query_pdf(question: str, session_id: str = "default") -> dict:
-    """Memory-aware RAG query pipeline locked to the specific user's session."""
-    from app.memory.session import (
-        build_context_for_prompt,
-        add_message
-    )
+    """Memory-aware RAG query pipeline with robust error catching."""
+    try:
+        from app.memory.session import (
+            build_context_for_prompt,
+            add_message
+        )
 
-    ensure_collection_exists()
+        ensure_collection_exists()
 
-    # Step 1: Get conversation history
-    conversation_context = build_context_for_prompt(session_id)
+        conversation_context = build_context_for_prompt(session_id)
+        question_vector = embedder.embed_query(question)
 
-    # Step 2: Vectorize the question
-    question_vector = embedder.embed_query(question)
+        search_response = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=question_vector,
+            query_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="session_id",
+                        match=models.MatchValue(value=session_id)
+                    )
+                ]
+            ),
+            limit=4,
+            score_threshold=0.70,
+            with_payload=True  # CRITICAL FIX: Force Qdrant to return the text chunks
+        )
 
-    # Step 3: Find top 4 most relevant chunks strictly within the user's session
-    results = qdrant.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=question_vector,
-        query_filter=models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="session_id",
-                    match=models.MatchValue(value=session_id)
-                )
-            ]
-        ),
-        limit=4,
-        score_threshold=0.70  # Ensures the LLM only sees high-quality semantic matches
-    )
+        results = search_response.points
 
-    if not results:
+        if not results:
+            return {
+                "status": "error",
+                "error": "I couldn't find a confident answer in your uploaded documents. Please try rephrasing your question."
+            }
+
+        # SAFE PARSING: Use .get() to prevent NoneType crashes if payload is ever missing
+        context_chunks = [r.payload.get("text", "") for r in results if r.payload]
+        context = "\n\n---\n\n".join(context_chunks)
+        sources = list(set([r.payload.get("filename", "Unknown") for r in results if r.payload]))
+
+        prompt = f"""
+        You are a helpful assistant answering questions based on company documents.
+        
+        {f"Conversation history:{conversation_context}" if conversation_context else ""}
+        
+        Use ONLY the document context below to answer the question.
+        If the answer is not in the context, say "I couldn't find this in the uploaded documents."
+        Use conversation history to understand follow-up questions.
+        
+        Document context:
+        {context}
+        
+        Current question: {question}
+        
+        Give a clear, concise answer.
+        """
+
+        response = llm.invoke(prompt)
+        answer = response.content
+
+        add_message(session_id, "user", question)
+        add_message(session_id, "assistant", answer)
+
+        return {
+            "status": "success",
+            "question": question,
+            "answer": answer,
+            "sources": sources,
+            "chunks_used": len(results),
+            "session_id": session_id,
+            "contexts": context_chunks
+        }
+    except Exception as e:
+        # Safely catch any API limits or database drops and return them cleanly to the UI
         return {
             "status": "error",
-            "error": "I couldn't find a confident answer in your uploaded documents. Please try rephrasing your question."
+            "error": f"Semantic Engine Error: {str(e)}"
         }
-
-    # Step 4: Build context from retrieved chunks
-    context_chunks = [r.payload["text"] for r in results]
-    context = "\n\n---\n\n".join(context_chunks)
-    sources = list(set([r.payload["filename"] for r in results]))
-
-    # Step 5: Build memory-aware prompt
-    prompt = f"""
-    You are a helpful assistant answering questions based on company documents.
-    
-    {f"Conversation history:{conversation_context}" if conversation_context else ""}
-    
-    Use ONLY the document context below to answer the question.
-    If the answer is not in the context, say "I couldn't find this in the uploaded documents."
-    Use conversation history to understand follow-up questions.
-    
-    Document context:
-    {context}
-    
-    Current question: {question}
-    
-    Give a clear, concise answer.
-    """
-
-    response = llm.invoke(prompt)
-    answer = response.content
-
-    # Step 6: Save this exchange to memory
-    add_message(session_id, "user", question)
-    add_message(session_id, "assistant", answer)
-
-    return {
-        "status": "success",
-        "question": question,
-        "answer": answer,
-        "sources": sources,
-        "chunks_used": len(results),
-        "session_id": session_id,
-        "contexts": context_chunks
-    }
