@@ -1,6 +1,6 @@
+import io
 import pandas as pd
 import numpy as np
-import io
 from langchain_google_genai import ChatGoogleGenerativeAI
 from app.core.config import settings
 
@@ -10,6 +10,9 @@ llm = ChatGoogleGenerativeAI(
     google_api_key=settings.google_api_key,
     temperature=0
 )
+
+# Global in-memory cache to retain DataFrames across distinct chat turns per session
+active_dataframes = {}
 
 def extract_dataframe_context(df: pd.DataFrame) -> str:
     """Extracts structural blueprint without sending the raw payload."""
@@ -28,15 +31,30 @@ def extract_dataframe_context(df: pd.DataFrame) -> str:
     {df.describe().to_string()}
     """
     return context
-def run_analytical_engine(file_bytes: bytes, question: str) -> dict:
+
+def run_analytical_engine(file_bytes: bytes, question: str, session_id: str = "default") -> dict:
     """
-    Agentic execution pipeline with Smart Formatting.
+    Agentic execution pipeline with Stateful Memory Caching and Smart Formatting.
     """
     try:
-        df = pd.read_csv(io.BytesIO(file_bytes))
+        # STATEFUL MEMORY ROUTING LOGIC
+        if file_bytes:
+            # New file upload: parse and commit to active session memory
+            df = pd.read_csv(io.BytesIO(file_bytes))
+            active_dataframes[session_id] = df
+        elif session_id in active_dataframes:
+            # Subsequent turn: pick up the existing DataFrame from RAM
+            df = active_dataframes[session_id]
+        else:
+            # Fallback if server restarted or session dropped out of memory
+            return {
+                "status": "error",
+                "question": question,
+                "error": "No active dataset found in memory. Your session may have expired. Please re-upload your CSV file."
+            }
+
         context = extract_dataframe_context(df)
 
-        # 1. TWEAKED PROMPT: Allow natural language assignments for conceptual questions
         base_prompt = f"""
         You are an expert data analyst writing code to extract metrics from a pandas DataFrame named 'df'.
         
@@ -97,16 +115,16 @@ def run_analytical_engine(file_bytes: bytes, question: str) -> dict:
                     else:
                         raise ValueError("No scalar or structural 'result' variable was created.")
 
-                # 2. NEW FORMATTING LOGIC: Make the output beautiful before sending it to the frontend
+                # SMART FORMATTING LOGIC
                 if isinstance(raw_result, (pd.DataFrame, pd.Series)):
-                    # Wrap in Markdown text block to enforce Monospace font alignment in the UI
+                    # Wrap in Markdown block for structural monospace alignment in chat UI
                     final_answer = f"```text\n{raw_result.to_string()}\n```"
                 elif isinstance(raw_result, (list, np.ndarray, pd.Index)):
-                    # Clean up ugly Python lists/indices into nice comma-separated text
+                    # Extract raw structural metrics to comma-delimited bold string profiles
                     clean_list = ", ".join(map(str, raw_result))
                     final_answer = f"**{clean_list}**"
                 else:
-                    # Strings and numbers pass through normally
+                    # Strings, metrics, integers, and floats pass directly
                     final_answer = str(raw_result)
 
                 return {

@@ -12,7 +12,6 @@ llm = ChatGoogleGenerativeAI(
 )
 
 # NODE 1: ROUTER
-# Reads the question and decides which engine
 def router_node(state: AgentState) -> AgentState:
     """
     Looks at the question and file (if any) and decides:
@@ -24,7 +23,7 @@ def router_node(state: AgentState) -> AgentState:
     """
     question = state["question"]
     filename = state.get("filename", "")
-    session_id = state.get("session_id", "default") # Extract session_id
+    session_id = state.get("session_id", "default")
 
     # If a file was uploaded, use file extension to route
     if filename:
@@ -57,21 +56,16 @@ def router_node(state: AgentState) -> AgentState:
 
 
 # NODE 2: CSV ENGINE
-# Handles structured data questions
 def csv_node(state: AgentState) -> AgentState:
     """
-    Runs the analytical engine on the uploaded CSV.
+    Runs the analytical engine using stateful session caching.
     """
-    if not state.get("file_bytes"):
-        return {
-            **state,
-            "status": "error",
-            "error": "No CSV file provided. Please upload a CSV file with your question."
-        }
-
+    # Removed the 'if not file_bytes' error block because the analytical engine 
+    # will now intelligently fetch the cached DataFrame using the session_id.
     result = run_analytical_engine(
-        state["file_bytes"],
-        state["question"]
+        state.get("file_bytes"),
+        state["question"],
+        state.get("session_id", "default")
     )
 
     if result["status"] == "success":
@@ -89,7 +83,6 @@ def csv_node(state: AgentState) -> AgentState:
 
 
 # NODE 3: PDF ENGINE
-# Handles document/text questions
 def pdf_node(state: AgentState) -> AgentState:
     """
     Runs the semantic RAG engine against stored documents.
@@ -104,7 +97,7 @@ def pdf_node(state: AgentState) -> AgentState:
             **state,
             "answer": result["answer"],
             "sources": result.get("sources", []),
-            "chunks_used": result.get("chunks_used", 0), # Pass metadata to the frontend UI
+            "chunks_used": result.get("chunks_used", 0),
             "status": "success"
         }
     else:
@@ -116,11 +109,9 @@ def pdf_node(state: AgentState) -> AgentState:
 
 
 # ROUTING FUNCTION
-# Tells LangGraph which node to go to next
 def route_to_engine(state: AgentState) -> str:
     """
-    This function is called after router_node.
-    It returns the name of the next node to execute.
+    This function is called after router_node to determine the next graph route.
     """
     return state.get("engine", "pdf")
 
