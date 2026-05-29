@@ -30,9 +30,10 @@ export default function SmartOpsPage() {
   const [loading, setLoading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
 
-  // PATCH: Initialize as empty string to match server render perfectly
-  const [sessionId, setSessionId] = useState("");
+  // NETWORK LOCK: Prevents uploading the same file multiple times
+  const [isFileIngested, setIsFileIngested] = useState(false);
 
+  const [sessionId, setSessionId] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -40,7 +41,6 @@ export default function SmartOpsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // PATCH: Hydrate the session ID only after the client has safely mounted
   useEffect(() => {
     setSessionId(`session-${Date.now()}`);
   }, []);
@@ -56,6 +56,7 @@ export default function SmartOpsPage() {
       return;
     }
     setUploadedFile({ name: file.name, type: ext as "csv" | "pdf", file });
+    setIsFileIngested(false); // Reset network lock for the new file
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -83,7 +84,9 @@ export default function SmartOpsPage() {
       const formData = new FormData();
       formData.append("question", userMessage.content);
       formData.append("session_id", sessionId);
-      if (uploadedFile) {
+
+      // OPTIMIZATION: Only attach the heavy file payload if it hasn't been sent yet
+      if (uploadedFile && !isFileIngested) {
         formData.append("file", uploadedFile.file);
       }
 
@@ -91,6 +94,11 @@ export default function SmartOpsPage() {
         method: "POST",
         body: formData,
       });
+
+      // If the request succeeds, lock the file state so it isn't sent on the next turn
+      if (res.ok) {
+        setIsFileIngested(true);
+      }
 
       const data = await res.json();
 
@@ -132,6 +140,7 @@ export default function SmartOpsPage() {
   const clearChat = () => {
     setMessages([]);
     setUploadedFile(null);
+    setIsFileIngested(false); // Reset lock on clear
   };
 
   const formatTime = (date: Date) =>
@@ -145,7 +154,8 @@ export default function SmartOpsPage() {
       <aside style={{ ...styles.sidebar, ...(sidebarOpen ? {} : styles.sidebarClosed) }}>
         <div style={styles.sidebarHeader}>
           <div style={styles.logo}>
-            <span style={styles.logoIcon}>⌘</span>
+            {/* SAFELY ENCODED GLYPH */}
+            <span style={styles.logoIcon}>{"\u2318"}</span>
             <span style={styles.logoText}>SmartOps</span>
           </div>
           <button style={styles.iconBtn} onClick={() => setSidebarOpen(false)}>
@@ -182,7 +192,7 @@ export default function SmartOpsPage() {
                 <span style={styles.fileName}>{uploadedFile.name}</span>
                 <button
                   style={styles.removeBtn}
-                  onClick={(e) => { e.stopPropagation(); setUploadedFile(null); }}
+                  onClick={(e) => { e.stopPropagation(); setUploadedFile(null); setIsFileIngested(false); }}
                 >
                   ✕
                 </button>
@@ -263,7 +273,7 @@ export default function SmartOpsPage() {
         <div style={styles.messages}>
           {messages.length === 0 ? (
             <div style={styles.emptyState}>
-              <div style={styles.emptyIcon}>⌘</div>
+              <div style={styles.emptyIcon}>{"\u2318"}</div>
               <h2 style={styles.emptyTitle}>SmartOps Intelligence</h2>
               <p style={styles.emptySubtitle}>
                 Ask questions about your CSV data or PDF documents.<br />
@@ -296,7 +306,7 @@ export default function SmartOpsPage() {
                 }}
               >
                 {msg.role === "assistant" && (
-                  <div style={styles.avatar}>⌘</div>
+                  <div style={styles.avatar}>{"\u2318"}</div>
                 )}
                 <div style={{
                   ...styles.bubble,
@@ -347,7 +357,7 @@ export default function SmartOpsPage() {
 
           {loading && (
             <div style={styles.messageRow}>
-              <div style={styles.avatar}>⌘</div>
+              <div style={styles.avatar}>{"\u2318"}</div>
               <div style={{ ...styles.bubble, ...styles.aiBubble }}>
                 <div style={styles.typingDots}>
                   <span style={styles.dot} className="dot1" />
@@ -395,6 +405,7 @@ export default function SmartOpsPage() {
     </div>
   );
 }
+
 
 const styles: Record<string, React.CSSProperties> = {
   root: {

@@ -1,12 +1,10 @@
-from fastapi import APIRouter, UploadFile, File, Form, Request #, HTTPException
-from typing import Optional #, List
+from fastapi import APIRouter, UploadFile, File, Form, Request
+from typing import Optional
 from app.engines.analytical import run_analytical_engine
 from app.engines.semantic import ingest_pdf, query_pdf
 from app.memory.session import clear_session
 from app.agent.graph import smartops_graph
-# import os 
-# from dataset import Dataset
-# from pydantic import BaseModel
+from app.engines.evaluator import evaluate_rag_response
 
 router = APIRouter()
 
@@ -28,7 +26,7 @@ async def ingest_pdf_route(
     file: UploadFile = File(...)
 ):
     file_bytes = await file.read()
-    result = ingest_pdf(file_bytes, file.filename)
+    result = ingest_pdf(file_bytes, file.filename, session_id="default")
     return result
 
 @router.post("/query/pdf")
@@ -55,6 +53,20 @@ async def ask(
     Upload a CSV or PDF (optional) and ask any question.
     The agent automatically routes to the right engine.
     """
+    clean_msg = question.strip().lower()
+
+    # FAST-ROUTE INTERCEPTOR: Catch greetings instantly to bypass heavy LLM loads
+    if clean_msg in ["hey", "hello", "hi", "test", "ping", "good morning", "good afternoon"]:
+        return {
+            "status": "success",
+            "question": question,
+            "engine_used": "System Guard",
+            "answer": "👋 Hello! I am your SmartOps assistant. To get started, please upload a **CSV** for tabular data analysis or a **PDF** for document-based semantic querying.",
+            "sources": [],
+            "session_id": session_id,
+            "error": None
+        }
+
     file_bytes = None
     filename = None
 
@@ -62,7 +74,7 @@ async def ask(
         file_bytes = await file.read()
         filename = file.filename
 
-    # Run through LangGraph
+    # Run through LangGraph for actual queries
     result = smartops_graph.invoke({
         "question": question,
         "session_id": session_id,
@@ -84,141 +96,6 @@ async def ask(
         "session_id": session_id,
         "error": result.get("error")
     }
-    
-# Webhook endpoint for n8n
-@router.post("/webhook/ask")
-async def webhook_ask(request: Request):
-    """
-    JSON-based endpoint for n8n and external integrations.
-    No file upload — text questions only.
-    """
-    body = await request.json()
-    question = body.get("question", "")
-    session_id = body.get("session_id", "default")
-    source = body.get("source", "webhook")
-
-    if not question:
-        return {"status": "error", "error": "No question provided"}
-
-    result = smartops_graph.invoke({
-        "question": question,
-        "session_id": session_id,
-        "file_bytes": None,
-        "filename": None,
-        "engine": None,
-        "answer": None,
-        "sources": None,
-        "status": None,
-        "error": None
-    })
-
-    return {
-        "status": result.get("status"),
-        "question": question,
-        "engine_used": result.get("engine"),
-        "answer": result.get("answer"),
-        "sources": result.get("sources"),
-        "session_id": session_id,
-        "source": source
-    }
-    
-# import base64
-
-# @router.post("/ingest/pdf/base64")
-# async def ingest_pdf_base64(request: Request):
-#     """
-#     Accepts base64 encoded PDF from n8n Google Drive workflow.
-#     n8n downloads files as base64, so this endpoint handles that format.
-#     """
-#     body = await request.json()
-#     filename = body.get("filename", "document.pdf")
-#     file_base64 = body.get("file_base64", "")
-#     source = body.get("source", "n8n")
-
-#     if not file_base64:
-#         return {"status": "error", "error": "No file data provided"}
-
-#     try:
-#         # 1. CLEAN THE STRING: Remove n8n's "data:application/pdf;base64," prefix if it exists
-#         if "," in file_base64:
-#             file_base64 = file_base64.split(",")[-1]
-
-#         # 2. Decode the pure base64 back to bytes
-#         file_bytes = base64.b64decode(file_base64)
-        
-#         # 3. Process the PDF
-#         result = ingest_pdf(file_bytes, filename)
-#         result["source"] = source
-#         return result
-        
-#     except Exception as e:
-#         return {"status": "error", "error": str(e)}
-    
-    
-    
-    
-
-# # RAGAS and LangChain Imports
-# from ragas import evaluate
-# from ragas.metrics import faithfulness, answer_relevancy, context_recall
-# from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-
-# router = APIRouter()
-
-# # 1. Define the Pydantic Request Model
-# class EvaluationRequest(BaseModel):
-#     question: str
-#     answer: str
-#     contexts: List[str]  # The raw text chunks retrieved from Qdrant
-#     ground_truth: str = "" # Optional: What the perfect answer should have been
-
-# @router.post("/api/evaluate")
-# async def evaluate_rag_response(req: EvaluationRequest):
-#     """
-#     Evaluates the quality of the PDF Semantic Engine's response using RAGAS.
-#     """
-#     try:
-#         # 2. Configure Models using your existing Google API Key
-#         # Note: Ragas prefers the 'pro' model for evaluation logic, but flash works too.
-#         eval_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash") 
-#         eval_embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-
-#         # 3. Format Data for RAGAS (Requires a HuggingFace Dataset)
-#         data = {
-#             "question": [req.question],
-#             "answer": [req.answer],
-#             "contexts": [req.contexts],
-#             "ground_truth": [req.ground_truth] if req.ground_truth else [""]
-#         }
-#         dataset = Dataset.from_dict(data)
-
-#         # 4. Run the Evaluation
-#         # Faithfulness: Is the answer hallucinated or backed by the contexts?
-#         # Answer Relevancy: Does it actually answer the user's question?
-#         # Context Recall: Did Qdrant retrieve the right info? (Requires ground_truth)
-#         metrics_to_run = [faithfulness, answer_relevancy]
-        
-#         if req.ground_truth:
-#             metrics_to_run.append(context_recall)
-
-#         result = evaluate(
-#             dataset=dataset,
-#             metrics=metrics_to_run,
-#             llm=eval_llm,
-#             embeddings=eval_embeddings,
-#             raise_exceptions=False 
-#         )
-
-#         # 5. Return structured scores
-#         return {
-#             "status": "success",
-#             "scores": result.to_pandas().to_dict(orient="records")[0]
-#         }
-
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
-
-from app.engines.evaluator import evaluate_rag_response
 
 # Evaluation store - keeps last 50 evaluations in memory
 evaluation_history = []
@@ -227,11 +104,6 @@ evaluation_history = []
 async def evaluate_response(request: Request):
     """
     Evaluates a RAG response using RAGAS metrics.
-    
-    Send a question, the answer your system gave, and the
-    context chunks that were used. Get back quality scores.
-    
-    Use this endpoint to measure how good your RAG pipeline is.
     """
     body = await request.json()
     question = body.get("question", "")
@@ -252,15 +124,12 @@ async def evaluate_response(request: Request):
         ground_truth=ground_truth
     )
 
-    # Store in history
     if result["status"] == "success":
         evaluation_history.append(result)
-        # Keep only last 50
         if len(evaluation_history) > 50:
             evaluation_history.pop(0)
 
     return result
-
 
 @router.post("/query-and-evaluate")
 async def query_and_evaluate(
@@ -269,20 +138,13 @@ async def query_and_evaluate(
     ground_truth: str = Form(default=None)
 ):
     """
-    Single endpoint that:
-    1. Queries your PDF documents
-    2. Automatically evaluates the response quality
-    3. Returns both the answer AND the quality scores
-    
-    This is the showcase endpoint - shows answer + trustworthiness score together.
+    Single endpoint that queries PDF documents and evaluates the response quality.
     """
-    # Step 1: Get the answer
     query_result = query_pdf(question, session_id)
 
     if query_result["status"] == "error":
         return query_result
 
-    # Step 2: Evaluate the answer
     eval_result = evaluate_rag_response(
         question=question,
         answer=query_result["answer"],
@@ -290,7 +152,6 @@ async def query_and_evaluate(
         ground_truth=ground_truth
     )
 
-    # Step 3: Combine results
     return {
         "status": "success",
         "question": question,
@@ -302,12 +163,10 @@ async def query_and_evaluate(
         "chunks_used": query_result.get("chunks_used", 0)
     }
 
-
 @router.get("/evaluations/history")
 def get_evaluation_history():
     """
     Returns the last 50 evaluation results.
-    Used by the dashboard to show quality trends over time.
     """
     if not evaluation_history:
         return {
@@ -316,7 +175,6 @@ def get_evaluation_history():
             "evaluations": []
         }
 
-    # Calculate averages
     scores_list = [e["scores"] for e in evaluation_history if "scores" in e]
 
     avg_faithfulness = round(
@@ -335,5 +193,5 @@ def get_evaluation_history():
             "answer_relevancy": avg_relevancy,
             "overall": round((avg_faithfulness + avg_relevancy) / 2, 4)
         },
-        "evaluations": evaluation_history[-10:]  # Return last 10
+        "evaluations": evaluation_history[-10:]
     }

@@ -11,10 +11,8 @@ llm = ChatGoogleGenerativeAI(
     temperature=0
 )
 
-
 # NODE 1: ROUTER
 # Reads the question and decides which engine
-
 def router_node(state: AgentState) -> AgentState:
     """
     Looks at the question and file (if any) and decides:
@@ -26,15 +24,16 @@ def router_node(state: AgentState) -> AgentState:
     """
     question = state["question"]
     filename = state.get("filename", "")
+    session_id = state.get("session_id", "default") # Extract session_id
 
     # If a file was uploaded, use file extension to route
     if filename:
         if filename.lower().endswith(".csv"):
             return {**state, "engine": "csv"}
         elif filename.lower().endswith(".pdf"):
-            # Ingest the PDF first if file bytes are present
+            # Ingest the PDF first if file bytes are present, passing the session_id for isolation
             if state.get("file_bytes"):
-                ingest_pdf(state["file_bytes"], filename)
+                ingest_pdf(state["file_bytes"], filename, session_id)
             return {**state, "engine": "pdf"}
 
     # No file uploaded - ask Gemini to classify the question
@@ -57,10 +56,8 @@ def router_node(state: AgentState) -> AgentState:
     return {**state, "engine": engine}
 
 
-
 # NODE 2: CSV ENGINE
 # Handles structured data questions
-
 def csv_node(state: AgentState) -> AgentState:
     """
     Runs the analytical engine on the uploaded CSV.
@@ -91,10 +88,8 @@ def csv_node(state: AgentState) -> AgentState:
         }
 
 
-
 # NODE 3: PDF ENGINE
 # Handles document/text questions
-
 def pdf_node(state: AgentState) -> AgentState:
     """
     Runs the semantic RAG engine against stored documents.
@@ -109,6 +104,7 @@ def pdf_node(state: AgentState) -> AgentState:
             **state,
             "answer": result["answer"],
             "sources": result.get("sources", []),
+            "chunks_used": result.get("chunks_used", 0), # Pass metadata to the frontend UI
             "status": "success"
         }
     else:
@@ -119,10 +115,8 @@ def pdf_node(state: AgentState) -> AgentState:
         }
 
 
-
 # ROUTING FUNCTION
 # Tells LangGraph which node to go to next
-
 def route_to_engine(state: AgentState) -> str:
     """
     This function is called after router_node.
@@ -131,9 +125,7 @@ def route_to_engine(state: AgentState) -> str:
     return state.get("engine", "pdf")
 
 
-
 # BUILD THE GRAPH
-
 def build_graph():
     graph = StateGraph(AgentState)
 

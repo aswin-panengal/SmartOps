@@ -3,6 +3,7 @@ import uuid
 from pypdf import PdfReader
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from qdrant_client import QdrantClient
+from qdrant_client.http import models
 from qdrant_client.models import PointStruct, VectorParams, Distance
 from app.core.config import settings
 
@@ -13,6 +14,7 @@ embedder = GoogleGenerativeAIEmbeddings(
     google_api_key=settings.google_api_key,
     output_dimensionality=768 # Forces the new 3072 model to fit our 768 Qdrant table
 )
+
 # Initialize Gemini
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash-lite",
@@ -20,7 +22,7 @@ llm = ChatGoogleGenerativeAI(
     temperature=0
 )
 
-# Smart connection -use cloude else falls back to local 
+# Smart connection - use cloud else fall back to local 
 if settings.qdrant_url:
     qdrant = QdrantClient(
         url=settings.qdrant_url,
@@ -36,10 +38,7 @@ COLLECTION_NAME = "smartops_documents_v2"
 VECTOR_SIZE = 768  # Google embedding-001 produces 768-dimensional vectors
 
 def ensure_collection_exists():
-    """
-    Create the Qdrant collection if it doesn't exist yet.
-    A collection is like a table in a regular database.
-    """
+    """Create the Qdrant collection if it doesn't exist yet."""
     existing = [c.name for c in qdrant.get_collections().collections]
     if COLLECTION_NAME not in existing:
         qdrant.create_collection(
@@ -59,14 +58,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     return text
 
 def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list:
-    """
-    Split text into overlapping chunks.
-    Overlap ensures we don't lose context at chunk boundaries.
-    
-    Example with chunk_size=10, overlap=2:
-    "ABCDEFGHIJKLMNOP" becomes:
-    ["ABCDEFGHIJ", "IJKLMNOPQR", ...]
-    """
+    """Split text into overlapping chunks."""
     words = text.split()
     chunks = []
     start = 0
@@ -77,7 +69,8 @@ def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list:
         start += chunk_size - overlap
     return chunks
 
-def ingest_pdf(file_bytes: bytes, filename: str) -> dict:
+def ingest_pdf(file_bytes: bytes, filename: str, session_id: str) -> dict:
+    """Extracts, chunks, embeds, and stores PDF data bounded by session context."""
     ensure_collection_exists()
 
     # Step 1: Extract text
@@ -91,7 +84,7 @@ def ingest_pdf(file_bytes: bytes, filename: str) -> dict:
     # Step 3: Google embeddings - embed all chunks at once
     vectors = embedder.embed_documents(chunks)
 
-    # Step 4: Store in Qdrant
+    # Step 4: Store in Qdrant with specific session_id binding
     points = []
     for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
         points.append(PointStruct(
@@ -100,6 +93,7 @@ def ingest_pdf(file_bytes: bytes, filename: str) -> dict:
             payload={
                 "text": chunk,
                 "filename": filename,
+                "session_id": session_id,  # Isolates this chunk to the specific user/session
                 "chunk_index": i
             }
         ))
@@ -117,15 +111,7 @@ def ingest_pdf(file_bytes: bytes, filename: str) -> dict:
     }
 
 def query_pdf(question: str, session_id: str = "default") -> dict:
-    """
-    Memory-aware RAG query pipeline:
-    1. Load conversation history for this session
-    2. Vectorize the question
-    3. Find similar chunks in Qdrant
-    4. Build prompt with history + context
-    5. Get answer from Gemini
-    6. Save exchange to memory
-    """
+    """Memory-aware RAG query pipeline locked to the specific user's session."""
     from app.memory.session import (
         build_context_for_prompt,
         add_message
@@ -139,17 +125,26 @@ def query_pdf(question: str, session_id: str = "default") -> dict:
     # Step 2: Vectorize the question
     question_vector = embedder.embed_query(question)
 
-    # Step 3: Find top 4 most relevant chunks
-    results = qdrant.query_points(
+    # Step 3: Find top 4 most relevant chunks strictly within the user's session
+    results = qdrant.search(
         collection_name=COLLECTION_NAME,
-        query=question_vector,
-        limit=4
-    ).points
+        query_vector=question_vector,
+        query_filter=models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="session_id",
+                    match=models.MatchValue(value=session_id)
+                )
+            ]
+        ),
+        limit=4,
+        score_threshold=0.70  # Ensures the LLM only sees high-quality semantic matches
+    )
 
     if not results:
         return {
             "status": "error",
-            "error": "No documents found. Please upload a PDF first."
+            "error": "I couldn't find a confident answer in your uploaded documents. Please try rephrasing your question."
         }
 
     # Step 4: Build context from retrieved chunks
