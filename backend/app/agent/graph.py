@@ -4,6 +4,7 @@ from app.engines.analytical import run_analytical_engine
 from app.engines.semantic import query_pdf, ingest_pdf
 from app.core.config import settings
 from langchain_google_genai import ChatGoogleGenerativeAI
+from app.agent.schemas import AssistantResponse
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash-lite",
@@ -107,7 +108,58 @@ def pdf_node(state: AgentState) -> AgentState:
             "error": result.get("error", "PDF query failed")
         }
 
+# NODE 4: THE COMPOSER
+# Polishes the raw engine output into a friendly, structured assistant response
+def composer_node(state: AgentState) -> AgentState:
+    """
+    Takes the raw answer from the semantic or analytical engine and uses the LLM
+    to format it into a friendly, structured response with follow-up suggestions.
+    """
+    # If there was an error in the engine, just pass it through directly
+    if state.get("status") == "error":
+        return state
 
+    raw_answer = state.get("answer", "")
+    question = state.get("question", "")
+    engine = state.get("engine", "unknown")
+
+    # Use the structured output feature of Gemini
+    structured_llm = llm.with_structured_output(AssistantResponse)
+
+    prompt = f"""
+    You are SmartOps, a helpful AI data assistant. 
+    A backend engine just processed the user's question. 
+    
+    User Question: {question}
+    Engine Used: {engine.upper()}
+    Raw Engine Output:
+    {raw_answer}
+    
+    Take the raw output above and format it into a friendly response.
+    1. 'direct_answer': Provide the exact answer cleanly. If the raw output is a markdown table or code block, preserve it exactly.
+    2. 'explanation': Briefly explain how you got the answer (e.g., "I summed the sales column" or "Based on the remote work policy document").
+    3. 'follow_up_questions': Suggest 3 logical next questions the user could ask to explore this data/document further.
+    """
+
+    try:
+        response_data = structured_llm.invoke(prompt)
+        
+        # Format the final string exactly how the frontend expects it
+        final_markdown = f"{response_data.direct_answer}\n\n"
+        final_markdown += f"*_{response_data.explanation}_*\n\n"
+        final_markdown += "**Suggested Next Steps:**\n"
+        for q in response_data.follow_up_questions:
+            final_markdown += f"- {q}\n"
+
+        return {
+            **state,
+            "answer": final_markdown
+        }
+    except Exception as e:
+        # Fallback if structured output fails
+        return state
+    
+    
 # ROUTING FUNCTION
 def route_to_engine(state: AgentState) -> str:
     """
@@ -124,6 +176,7 @@ def build_graph():
     graph.add_node("router", router_node)
     graph.add_node("csv", csv_node)
     graph.add_node("pdf", pdf_node)
+    graph.add_node("composer", composer_node) 
 
     # Set entry point
     graph.set_entry_point("router")
@@ -138,12 +191,18 @@ def build_graph():
         }
     )
 
-    # Both engines go to END after completing
-    graph.add_edge("csv", END)
-    graph.add_edge("pdf", END)
+    # Both engines now go to the composer to be polished
+    graph.add_edge("csv", "composer") 
+    graph.add_edge("pdf", "composer") 
+    
+    # The composer goes to the END
+    graph.add_edge("composer", END)   
 
     return graph.compile()
 
 
 # Compile once at startup
 smartops_graph = build_graph()
+
+
+
