@@ -8,9 +8,11 @@ from app.engines.evaluator import evaluate_rag_response
 
 router = APIRouter()
 
+
 @router.get("/status")
 def status():
     return {"engine": "SmartOps ready", "version": "1.0.0"}
+
 
 @router.post("/analyze/csv")
 async def analyze_csv(
@@ -18,29 +20,30 @@ async def analyze_csv(
     question: str = Form(...)
 ):
     file_bytes = await file.read()
-    result = run_analytical_engine(file_bytes, question)
-    return result
+    return run_analytical_engine(file_bytes, question)
+
 
 @router.post("/ingest/pdf")
 async def ingest_pdf_route(
     file: UploadFile = File(...)
 ):
     file_bytes = await file.read()
-    result = ingest_pdf(file_bytes, file.filename, session_id="default")
-    return result
+    return ingest_pdf(file_bytes, file.filename, session_id="default")
+
 
 @router.post("/query/pdf")
 async def query_pdf_route(
     question: str = Form(...),
     session_id: str = Form(default="default")
 ):
-    result = query_pdf(question, session_id)
-    return result
+    return query_pdf(question, session_id)
+
 
 @router.delete("/session/{session_id}")
 def delete_session(session_id: str):
     clear_session(session_id)
     return {"status": "cleared", "session_id": session_id}
+
 
 @router.post("/ask")
 async def ask(
@@ -49,24 +52,9 @@ async def ask(
     file: Optional[UploadFile] = File(default=None)
 ):
     """
-    The unified intelligent endpoint.
-    Upload a CSV or PDF (optional) and ask any question.
-    The agent automatically routes to the right engine.
+    Unified endpoint. Accepts an optional CSV/PDF plus a user question, then
+    routes through the agent graph for clarification, CSV analysis, or PDF RAG.
     """
-    clean_msg = question.strip().lower()
-
-    # FAST-ROUTE INTERCEPTOR: Catch greetings instantly to bypass heavy LLM loads
-    if clean_msg in ["hey", "hello", "hi", "test", "ping", "good morning", "good afternoon"]:
-        return {
-            "status": "success",
-            "question": question,
-            "engine_used": "System Guard",
-            "answer": "👋 Hello! I am your SmartOps assistant. To get started, please upload a **CSV** for tabular data analysis or a **PDF** for document-based semantic querying.",
-            "sources": [],
-            "session_id": session_id,
-            "error": None
-        }
-
     file_bytes = None
     filename = None
 
@@ -74,7 +62,6 @@ async def ask(
         file_bytes = await file.read()
         filename = file.filename
 
-    # Run through LangGraph for actual queries
     result = smartops_graph.invoke({
         "question": question,
         "session_id": session_id,
@@ -83,6 +70,8 @@ async def ask(
         "engine": None,
         "answer": None,
         "sources": None,
+        "chunks_used": 0,
+        "contexts": [],
         "status": None,
         "error": None
     })
@@ -92,13 +81,17 @@ async def ask(
         "question": question,
         "engine_used": result.get("engine"),
         "answer": result.get("answer"),
-        "sources": result.get("sources"),
+        "sources": result.get("sources") or [],
+        "chunks_used": result.get("chunks_used", 0),
+        "contexts": result.get("contexts", []),
         "session_id": session_id,
         "error": result.get("error")
     }
 
+
 # Evaluation store - keeps last 50 evaluations in memory
 evaluation_history = []
+
 
 @router.post("/evaluate")
 async def evaluate_response(request: Request):
@@ -131,6 +124,7 @@ async def evaluate_response(request: Request):
 
     return result
 
+
 @router.post("/query-and-evaluate")
 async def query_and_evaluate(
     question: str = Form(...),
@@ -162,6 +156,7 @@ async def query_and_evaluate(
         "interpretation": eval_result.get("interpretation", {}),
         "chunks_used": query_result.get("chunks_used", 0)
     }
+
 
 @router.get("/evaluations/history")
 def get_evaluation_history():

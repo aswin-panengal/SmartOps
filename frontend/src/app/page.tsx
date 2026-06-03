@@ -17,7 +17,7 @@ const API_BASE = (() => {
   return "http://localhost:8000";
 })();
 
-type Engine = "csv" | "pdf" | null;
+type Engine = "csv" | "pdf" | "clarify" | null;
 
 interface Message {
   id: string;
@@ -348,7 +348,7 @@ export default function SmartOpsPage() {
                     </div>
                   )}
 
-                  {msg.engine && (
+                  {msg.engine && msg.engine !== "clarify" && (
                     <div style={styles.bubbleMeta}>
                       <span style={{
                         ...styles.engineBadge,

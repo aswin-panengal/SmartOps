@@ -112,3 +112,8 @@ def clear_session(session_id: str):
     """Reset a session completely."""
     if session_id in sessions:
         del sessions[session_id]
+    try:
+        from app.engines.analytical import clear_active_dataframe
+        clear_active_dataframe(session_id)
+    except Exception:
+        pass

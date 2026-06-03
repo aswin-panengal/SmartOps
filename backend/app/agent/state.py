@@ -1,4 +1,4 @@
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, NotRequired
 
 class AgentState(TypedDict):
     """
@@ -13,5 +13,7 @@ class AgentState(TypedDict):
     engine: Optional[str]      # Which engine was selected: "csv" or "pdf"
     answer: Optional[str]      # Final answer
     sources: Optional[list]    # Source documents used
+    chunks_used: NotRequired[int]  # Number of document chunks used for PDF answers
+    contexts: NotRequired[list]    # Retrieved context chunks for evaluation/debug views
     status: Optional[str]      # "success" or "error"
     error: Optional[str]       # Error message if any

@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.routes import router
@@ -10,17 +10,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Secure Production CORS Configuration
-# Only requests from these explicit domains will be permitted by the server
-origins = [
-    "http://localhost:3000",                                        # Local Next.js development server
-    "https://smart-7iqexaluz-aswin-panengals-projects.vercel.app",  # Your unique Vercel preview domain
-    "https://smart-ops-git-main-aswin-panengals-projects.vercel.app" # Your main Vercel branch deployment tracking link
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.allowed_origins,
     allow_credentials=True,  # Safe to set to True now that wildcards are removed
     allow_methods=["*"],     # Restricts or allows standard methods (POST, GET, OPTIONS, etc.)
     allow_headers=["*"],     # Allows all standard request headers
@@ -34,7 +26,7 @@ def root():
     return {"message": f"{settings.app_name} is running"}
 
 @app.get("/health")
-def health_check():
+def health_check(response: Response):
     try:
         # Connect to either cloud or local Qdrant
         if settings.qdrant_url:
@@ -54,6 +46,7 @@ def health_check():
             "app": settings.app_name
         }
     except Exception as e:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {
             "status": "unhealthy",
             "qdrant": str(e)

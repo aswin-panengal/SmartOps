@@ -4,7 +4,7 @@ from app.engines.analytical import run_analytical_engine
 from app.engines.semantic import query_pdf, ingest_pdf
 from app.core.config import settings
 from langchain_google_genai import ChatGoogleGenerativeAI
-from app.agent.schemas import AssistantResponse
+from app.agent.schemas import RouterDecision
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash-lite",
@@ -12,57 +12,192 @@ llm = ChatGoogleGenerativeAI(
     temperature=0
 )
 
-# NODE 1: ROUTER
+GREETINGS = {
+    "hey", "hello", "hi", "hii", "test", "ping",
+    "good morning", "good afternoon", "good evening"
+}
+
+AFFIRMATIONS = {
+    "yes", "y", "sure", "do it", "please", "yes please",
+    "ok", "okay", "yeah", "show me", "go ahead"
+}
+
+VAGUE_REQUESTS = {
+    "analyze", "analyse", "analyze this", "analyse this",
+    "summarize", "summarise", "summarize this", "summarise this",
+    "what do you think", "help", "help me", "start"
+}
+
+# NODE 1: SMART ROUTER
 def router_node(state: AgentState) -> AgentState:
-    """
-    Looks at the question and file (if any) and decides:
-    - "csv" if the question is about structured/tabular data
-    - "pdf" if the question is about documents/text content
-    
-    If a file is attached, it uses the file type to decide.
-    If no file, it asks Gemini to classify the question.
-    """
     question = state["question"]
     filename = state.get("filename", "")
     session_id = state.get("session_id", "default")
+    file_bytes = state.get("file_bytes")
+    lower_q = question.strip().lower()
 
-    # If a file was uploaded, use file extension to route
-    if filename:
-        if filename.lower().endswith(".csv"):
-            return {**state, "engine": "csv"}
-        elif filename.lower().endswith(".pdf"):
-            # Ingest the PDF first if file bytes are present, passing the session_id for isolation
-            if state.get("file_bytes"):
-                ingest_pdf(state["file_bytes"], filename, session_id)
-            return {**state, "engine": "pdf"}
-
-    # No file uploaded - ask Gemini to classify the question
-    prompt = f"""
-    Classify this question into one of two categories:
-    - "csv": Questions about data, numbers, statistics, spreadsheets, calculations, rows, columns
-    - "pdf": Questions about documents, policies, text content, information lookup
-
-    Question: {question}
+    from app.engines.analytical import has_active_dataframe
     
-    Reply with ONLY the single word: csv or pdf
+    # 1. Pull Chat History safely
+    try:
+        from app.memory.session import build_context_for_prompt
+        chat_history = build_context_for_prompt(session_id)
+    except (ImportError, ModuleNotFoundError, NameError):
+        chat_history = ""
+
+    # 2. Store uploaded files before any greeting/clarification response. The
+    # frontend sends the file only once, so this must never be skipped.
+    if file_bytes and filename:
+        if filename.lower().endswith(".pdf"):
+            ingest_result = ingest_pdf(file_bytes, filename, session_id)
+            if ingest_result.get("status") != "success":
+                return {
+                    **state,
+                    "engine": "clarify",
+                    "answer": ingest_result.get(
+                        "error",
+                        "I could not read that PDF. Please try a text-based PDF or upload a clearer file."
+                    )
+                }
+            if lower_q in GREETINGS:
+                return {
+                    **state,
+                    "engine": "clarify",
+                    "answer": "Hello, I have indexed your PDF. Ask me for a summary, key points, risks, or any detail from the document."
+                }
+            if lower_q in VAGUE_REQUESTS:
+                return {**state, "engine": "pdf", "question": "Summarize this document and highlight the key points."}
+            return {**state, "engine": "pdf"}
+        elif filename.lower().endswith(".csv"):
+            if lower_q in GREETINGS:
+                return {
+                    **state,
+                    "engine": "csv",
+                    "question": (
+                        "Give a quick useful profile of this CSV: row count, column count, column names, "
+                        "missing values, obvious numeric totals or averages, and any notable anomalies."
+                    )
+                }
+            if lower_q in VAGUE_REQUESTS:
+                return {
+                    **state,
+                    "engine": "csv",
+                    "question": (
+                        "Give a quick useful profile of this CSV: row count, column count, column names, "
+                        "missing values, obvious numeric totals or averages, and any notable anomalies."
+                    )
+                }
+            return {**state, "engine": "csv"}
+
+    csv_loaded = has_active_dataframe(session_id)
+
+    # 3. Fast deterministic handling for common low-value turns.
+    if lower_q in GREETINGS:
+        file_hint = (
+            "Your CSV is ready, so you can ask for totals, trends, missing values, or anomalies."
+            if csv_loaded
+            else "Upload a CSV for data analysis or a PDF for document questions, then ask naturally."
+        )
+        return {
+            **state,
+            "engine": "clarify",
+            "answer": f"Hello, I am ready to help. {file_hint}"
+        }
+
+    # 4. Automated turn-taking for short confirmations.
+    # If the user gives an affirmative confirmation, look back at what the assistant suggested
+    if csv_loaded and lower_q in AFFIRMATIONS:
+        
+        # Ask Gemini to quickly extract the exact analysis question from the last message's context
+        context_prompt = f"""
+        The user just said '{question}' to confirm a suggestion.
+        Look at the recent conversation history below and determine what specific question or analysis the assistant offered to do.
+        Return ONLY that specific analysis question as a plain sentence. Do not include any filler text.
+        
+        History:
+        {chat_history}
+        """
+        try:
+            # We use the raw LLM invoke to swap out the question dynamically
+            resolved_question = llm.invoke(context_prompt).content.strip()
+            return {
+                **state,
+                "question": resolved_question, # Overrides "yes" with the actual question!
+                "engine": "csv"
+            }
+        except Exception:
+            # Fallback if context extraction drops out
+            return {**state, "engine": "csv"}
+
+    if lower_q in VAGUE_REQUESTS:
+        if csv_loaded:
+            return {
+                **state,
+                "engine": "csv",
+                "question": (
+                    "Give a quick useful profile of the active CSV: row count, column count, column names, "
+                    "missing values, obvious numeric totals or averages, and any notable anomalies."
+                )
+            }
+        return {
+            **state,
+            "engine": "clarify",
+            "answer": "Please upload a CSV or PDF first, then ask what you want to know from it."
+        }
+
+    # 5. Standard Router Execution for new inputs.
+    structured_router = llm.with_structured_output(RouterDecision)
+    
+    prompt = f"""
+    Evaluate the user's request to decide the routing engine.
+    
+    Recent Conversation History:
+    {chat_history if chat_history else "None"}
+    
+    Current User Request: "{question}"
+    CSV File Loaded in Memory: {csv_loaded}
+    
+    Rules:
+    - If vague (e.g., "analyze this", "summarize"): set is_clear=False, engine="clarify", and write a helpful clarification_message offering specific options.
+    - CRITICAL: If 'CSV File Loaded in Memory' is True, your clarification message MUST NOT say the file is missing. You must acknowledge that the data is ready and offer options!
+    - If specific (e.g., "what is the total revenue"): set is_clear=True, and set engine to "csv" (data) or "pdf" (text).
+    - If no history and it's a greeting, set engine="clarify" and say hello.
     """
+    
+    try:
+        decision = structured_router.invoke(prompt)
+        engine = decision.engine if decision.engine in {"csv", "pdf", "clarify"} else "clarify"
 
-    response = llm.invoke(prompt)
-    engine = response.content.strip().lower()
+        if engine == "csv" and not csv_loaded:
+            return {
+                **state,
+                "engine": "clarify",
+                "answer": "I can do that once a CSV is uploaded. Please attach the CSV and ask again."
+            }
 
-    if engine not in ["csv", "pdf"]:
-        engine = "pdf"  # Default to PDF for ambiguous questions
-
-    return {**state, "engine": engine}
-
-
+        return {
+            **state,
+            "engine": engine,
+            "answer": decision.clarification_message if not decision.is_clear else None
+        }
+    except Exception as e:
+        # STRICT FALLBACK: Prevent 500 errors if the LLM provider rate limits or drops connection
+        error_msg = str(e)
+        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+            safe_reply = "I am receiving too many requests right now and hit an API rate limit. Please wait about 60 seconds and try asking again."
+        else:
+            safe_reply = "My routing engine experienced a temporary connection issue. Please try again."
+            
+        return {
+            **state,
+            "engine": "clarify", # Route safely back to the user
+            "answer": safe_reply
+        }
 # NODE 2: CSV ENGINE
 def csv_node(state: AgentState) -> AgentState:
     """
     Runs the analytical engine using stateful session caching.
     """
-    # Removed the 'if not file_bytes' error block because the analytical engine 
-    # will now intelligently fetch the cached DataFrame using the session_id.
     result = run_analytical_engine(
         state.get("file_bytes"),
         state["question"],
@@ -70,9 +205,18 @@ def csv_node(state: AgentState) -> AgentState:
     )
 
     if result["status"] == "success":
+        try:
+            from app.memory.session import add_message
+            add_message(state.get("session_id", "default"), "user", state["question"])
+            add_message(state.get("session_id", "default"), "assistant", result["answer"])
+        except Exception:
+            pass
+
         return {
             **state,
             "answer": result["answer"],
+            "rows_in_file": result.get("rows_in_file"),
+            "columns": result.get("columns", []),
             "status": "success"
         }
     else:
@@ -99,6 +243,7 @@ def pdf_node(state: AgentState) -> AgentState:
             "answer": result["answer"],
             "sources": result.get("sources", []),
             "chunks_used": result.get("chunks_used", 0),
+            "contexts": result.get("contexts", []),
             "status": "success"
         }
     else:
@@ -109,55 +254,37 @@ def pdf_node(state: AgentState) -> AgentState:
         }
 
 # NODE 4: THE COMPOSER
-# Polishes the raw engine output into a friendly, structured assistant response
 def composer_node(state: AgentState) -> AgentState:
     """
-    Takes the raw answer from the semantic or analytical engine and uses the LLM
-    to format it into a friendly, structured response with follow-up suggestions.
+    Takes the raw answer from the semantic or analytical engine and formats it
+    without another LLM call. This keeps answers fast and avoids rewriting tables.
     """
-    # If there was an error in the engine, just pass it through directly
     if state.get("status") == "error":
         return state
 
     raw_answer = state.get("answer", "")
-    question = state.get("question", "")
     engine = state.get("engine", "unknown")
 
-    # Use the structured output feature of Gemini
-    structured_llm = llm.with_structured_output(AssistantResponse)
-
-    prompt = f"""
-    You are SmartOps, a helpful AI data assistant. 
-    A backend engine just processed the user's question. 
-    
-    User Question: {question}
-    Engine Used: {engine.upper()}
-    Raw Engine Output:
-    {raw_answer}
-    
-    Take the raw output above and format it into a friendly response.
-    1. 'direct_answer': Provide the exact answer cleanly. If the raw output is a markdown table or code block, preserve it exactly.
-    2. 'explanation': Briefly explain how you got the answer (e.g., "I summed the sales column" or "Based on the remote work policy document").
-    3. 'follow_up_questions': Suggest 3 logical next questions the user could ask to explore this data/document further.
-    """
-
-    try:
-        response_data = structured_llm.invoke(prompt)
-        
-        # Format the final string exactly how the frontend expects it
-        final_markdown = f"{response_data.direct_answer}\n\n"
-        final_markdown += f"*_{response_data.explanation}_*\n\n"
-        final_markdown += "**Suggested Next Steps:**\n"
-        for q in response_data.follow_up_questions:
-            final_markdown += f"- {q}\n"
-
-        return {
-            **state,
-            "answer": final_markdown
-        }
-    except Exception as e:
-        # Fallback if structured output fails
+    if engine == "csv":
+        row_count = state.get("rows_in_file")
+        explanation = (
+            f"I checked this against the active CSV dataset ({row_count} rows)."
+            if row_count
+            else "I checked this against the active CSV dataset."
+        )
+        follow_up = "Want me to break it down by category, date, or top/bottom values?"
+    elif engine == "pdf":
+        sources = state.get("sources") or []
+        source_text = f" Source: {', '.join(sources)}." if sources else ""
+        explanation = f"I used the most relevant document chunks from your uploaded PDF.{source_text}"
+        follow_up = "Want me to summarize the key points or check another section?"
+    else:
         return state
+
+    return {
+        **state,
+        "answer": f"{raw_answer}\n\n_{explanation}_\n\n{follow_up}"
+    }
     
     
 # ROUTING FUNCTION
@@ -165,7 +292,19 @@ def route_to_engine(state: AgentState) -> str:
     """
     This function is called after router_node to determine the next graph route.
     """
-    return state.get("engine", "pdf")
+    engine = state.get("engine") or "clarify"
+    return engine if engine in {"csv", "pdf", "clarify"} else "clarify"
+
+# NODE: CLARIFY
+def clarify_node(state: AgentState) -> AgentState:
+    """
+    Bypasses the processing engines and asks the user for more details.
+    """
+    return {
+        **state,
+        "answer": state.get("answer") or "I can help with CSV analysis or PDF questions. Please upload a file or ask a more specific question.",
+        "status": "success" 
+    }
 
 
 # BUILD THE GRAPH
@@ -174,35 +313,33 @@ def build_graph():
 
     # Add all nodes
     graph.add_node("router", router_node)
+    graph.add_node("clarify", clarify_node)
     graph.add_node("csv", csv_node)
     graph.add_node("pdf", pdf_node)
-    graph.add_node("composer", composer_node) 
+    graph.add_node("composer", composer_node)
 
-    # Set entry point
     graph.set_entry_point("router")
 
-    # Add conditional routing after router node
+    # Add conditional routing
     graph.add_conditional_edges(
         "router",
         route_to_engine,
         {
             "csv": "csv",
-            "pdf": "pdf"
+            "pdf": "pdf",
+            "clarify": "clarify" 
         }
     )
 
-    # Both engines now go to the composer to be polished
-    graph.add_edge("csv", "composer") 
-    graph.add_edge("pdf", "composer") 
+    # Wire up the new paths
+    graph.add_edge("csv", "composer")
+    graph.add_edge("pdf", "composer")
     
-    # The composer goes to the END
-    graph.add_edge("composer", END)   
+    graph.add_edge("composer", END)
+    graph.add_edge("clarify", END) # Clarify goes straight to END, skipping composer
 
     return graph.compile()
 
 
 # Compile once at startup
 smartops_graph = build_graph()
-
-
-

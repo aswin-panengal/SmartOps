@@ -14,6 +14,14 @@ llm = ChatGoogleGenerativeAI(
 # Global in-memory cache to retain DataFrames across distinct chat turns per session
 active_dataframes = {}
 
+def has_active_dataframe(session_id: str) -> bool:
+    """Return whether this chat session already has a CSV loaded."""
+    return session_id in active_dataframes
+
+def clear_active_dataframe(session_id: str):
+    """Clear any cached CSV for a session."""
+    active_dataframes.pop(session_id, None)
+
 def extract_dataframe_context(df: pd.DataFrame) -> str:
     """Extracts structural blueprint without sending the raw payload."""
     context = f"""

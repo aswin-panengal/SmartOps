@@ -8,7 +8,12 @@ from ragas.metrics import (
 from datasets import Dataset
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from app.core.config import settings
-import time
+import math
+
+try:
+    from ragas.metrics import LLMContextPrecisionWithoutReference
+except Exception:
+    LLMContextPrecisionWithoutReference = None
 
 # RAGAS needs an LLM and embeddings to run evaluations
 llm = ChatGoogleGenerativeAI(
@@ -21,6 +26,45 @@ embeddings = GoogleGenerativeAIEmbeddings(
     model="models/text-embedding-004",
     google_api_key=settings.google_api_key
 )
+
+def _clean_contexts(contexts: list[str]) -> list[str]:
+    """Remove empty or malformed context chunks before sending them to RAGAS."""
+    return [
+        str(context).strip()
+        for context in contexts
+        if context and str(context).strip()
+    ]
+
+def _clean_answer_for_eval(answer: str) -> str:
+    """
+    The chat endpoint may append explanation/follow-up text after the direct answer.
+    RAGAS should score the factual answer, not the assistant's conversational hook.
+    """
+    answer = str(answer or "").strip()
+
+    if "\n\n_" in answer:
+        answer = answer.split("\n\n_", 1)[0].strip()
+
+    follow_up_markers = [
+        "\n\nWant me to ",
+        "\n\nWould you like ",
+        "\n\nDo you want "
+    ]
+    for marker in follow_up_markers:
+        if marker in answer:
+            answer = answer.split(marker, 1)[0].strip()
+
+    return answer
+
+def _safe_score(value):
+    """Return rounded score or None for NaN/invalid metric outputs."""
+    try:
+        numeric = float(value)
+        if math.isnan(numeric) or math.isinf(numeric):
+            return None
+        return round(numeric, 4)
+    except Exception:
+        return value
 
 def evaluate_rag_response(
     question: str,
@@ -47,23 +91,43 @@ def evaluate_rag_response(
       Requires ground truth to measure.
     """
     try:
+        clean_contexts = _clean_contexts(contexts)
+        clean_answer = _clean_answer_for_eval(answer)
+
+        if not clean_contexts:
+            return {
+                "status": "error",
+                "error": "No valid context chunks were provided for evaluation.",
+                "question": question
+            }
+
+        if not clean_answer:
+            return {
+                "status": "error",
+                "error": "No valid answer text was provided for evaluation.",
+                "question": question
+            }
+
         # RAGAS expects a specific dataset format
         data = {
             "question": [question],
-            "answer": [answer],
-            "contexts": [contexts],
+            "answer": [clean_answer],
+            "contexts": [clean_contexts],
         }
 
         # Only add ground truth if provided
         if ground_truth:
             data["ground_truth"] = [ground_truth]
+            data["reference"] = [ground_truth]
 
         dataset = Dataset.from_dict(data)
 
         # Select metrics based on whether ground truth is available
-        metrics = [faithfulness, answer_relevancy, context_precision]
+        metrics = [faithfulness, answer_relevancy]
         if ground_truth:
-            metrics.append(context_recall)
+            metrics.extend([context_precision, context_recall])
+        elif LLMContextPrecisionWithoutReference:
+            metrics.append(LLMContextPrecisionWithoutReference())
 
         # Run evaluation
         # Note: This makes additional Gemini API calls
@@ -71,7 +135,9 @@ def evaluate_rag_response(
             dataset,
             metrics=metrics,
             llm=llm,
-            embeddings=embeddings
+            embeddings=embeddings,
+            raise_exceptions=False,
+            show_progress=False
         )
 
         scores = result.to_pandas().to_dict(orient="records")[0]
@@ -79,15 +145,12 @@ def evaluate_rag_response(
         # Clean up scores - round to 4 decimal places
         cleaned_scores = {}
         for key, value in scores.items():
-            if key not in ["question", "answer", "contexts", "ground_truth"]:
-                try:
-                    cleaned_scores[key] = round(float(value), 4)
-                except:
-                    cleaned_scores[key] = value
+            if key not in ["question", "answer", "contexts", "ground_truth", "reference"]:
+                cleaned_scores[key] = _safe_score(value)
 
         # Add interpretation
-        faithfulness_score = cleaned_scores.get("faithfulness", 0)
-        relevancy_score = cleaned_scores.get("answer_relevancy", 0)
+        faithfulness_score = cleaned_scores.get("faithfulness")
+        relevancy_score = cleaned_scores.get("answer_relevancy")
 
         interpretation = interpret_scores(faithfulness_score, relevancy_score)
 
@@ -96,7 +159,9 @@ def evaluate_rag_response(
             "scores": cleaned_scores,
             "interpretation": interpretation,
             "question": question,
-            "answer_preview": answer[:200] + "..." if len(answer) > 200 else answer
+            "answer_preview": clean_answer[:200] + "..." if len(clean_answer) > 200 else clean_answer,
+            "contexts_used": len(clean_contexts),
+            "used_ground_truth": bool(ground_truth)
         }
 
     except Exception as e:
@@ -107,12 +172,14 @@ def evaluate_rag_response(
         }
 
 
-def interpret_scores(faithfulness: float, relevancy: float) -> dict:
+def interpret_scores(faithfulness: float | None, relevancy: float | None) -> dict:
     """
     Converts raw scores into human-readable interpretation.
     Useful for the dashboard and for understanding what scores mean.
     """
     def score_label(score):
+        if score is None:
+            return "Unavailable"
         if score >= 0.8:
             return "Excellent"
         elif score >= 0.6:
@@ -122,17 +189,24 @@ def interpret_scores(faithfulness: float, relevancy: float) -> dict:
         else:
             return "Poor"
 
-    overall = (faithfulness + relevancy) / 2
+    available_scores = [
+        score for score in [faithfulness, relevancy]
+        if isinstance(score, (int, float))
+    ]
+    overall = sum(available_scores) / len(available_scores) if available_scores else None
 
     return {
         "faithfulness_label": score_label(faithfulness),
         "relevancy_label": score_label(relevancy),
-        "overall_score": round(overall, 4),
+        "overall_score": round(overall, 4) if overall is not None else None,
         "overall_label": score_label(overall),
-        "hallucination_risk": "Low" if faithfulness >= 0.7 else "High",
+        "hallucination_risk": (
+            "Unknown" if faithfulness is None else
+            "Low" if faithfulness >= 0.7 else "High"
+        ),
         "recommendation": (
             "Response is reliable and on-topic."
-            if overall >= 0.7
+            if overall is not None and overall >= 0.7
             else "Consider re-ingesting documents or rephrasing the question."
         )
     }
