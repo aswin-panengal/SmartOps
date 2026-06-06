@@ -1,7 +1,7 @@
 "use client";
 
 import ReactMarkdown from "react-markdown";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 // Enforce strict runtime verification for production endpoints
 const API_BASE = (() => {
@@ -18,6 +18,7 @@ const API_BASE = (() => {
 })();
 
 type Engine = "csv" | "pdf" | "clarify" | null;
+type ServerState = "waking" | "ready" | "error";
 
 interface Message {
   id: string;
@@ -41,6 +42,7 @@ export default function SmartOpsPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
+  const [serverState, setServerState] = useState<ServerState>("waking");
 
   // NETWORK LOCK: Prevents uploading the same file multiple times
   const [isFileIngested, setIsFileIngested] = useState(false);
@@ -56,6 +58,30 @@ export default function SmartOpsPage() {
   useEffect(() => {
     setSessionId(`session-${Date.now()}`);
   }, []);
+
+  const wakeUpServer = useCallback(async () => {
+    setServerState("waking");
+
+    try {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 90000);
+
+      const res = await fetch(`${API_BASE}/health`, {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal,
+      });
+
+      window.clearTimeout(timeout);
+      setServerState(res.ok ? "ready" : "error");
+    } catch {
+      setServerState("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    wakeUpServer();
+  }, [wakeUpServer]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -79,7 +105,7 @@ export default function SmartOpsPage() {
   };
 
   const sendMessage = async () => {
-    if (!input.trim() || loading) return;
+    if (!input.trim() || loading || serverState !== "ready") return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -292,7 +318,20 @@ export default function SmartOpsPage() {
               <span style={styles.topbarHint}>Interactive Data Workspace</span>
             )}
           </div>
-          <div style={styles.statusDot} title="Backend connected" />
+          <div style={styles.serverStatus}>
+            <span style={{
+              ...styles.statusDot,
+              ...(serverState === "waking" ? styles.statusDotWaking : {}),
+              ...(serverState === "error" ? styles.statusDotError : {}),
+            }} />
+            <span style={styles.statusText}>
+              {serverState === "ready"
+                ? "Ready"
+                : serverState === "waking"
+                  ? "Starting backend"
+                  : "Connection issue"}
+            </span>
+          </div>
         </header>
 
         {/* Messages */}
@@ -301,6 +340,35 @@ export default function SmartOpsPage() {
             <div style={styles.emptyState}>
               <div style={styles.emptyIcon}>{"\u2318"}</div>
               <h2 style={styles.emptyTitle}>SmartOps Intelligence</h2>
+              {serverState !== "ready" && (
+                <div style={{
+                  ...styles.wakeNotice,
+                  ...(serverState === "error" ? styles.wakeNoticeError : {}),
+                }}>
+                  <div style={styles.wakeNoticeHeader}>
+                    <span style={{
+                      ...styles.statusDot,
+                      ...(serverState === "waking" ? styles.statusDotWaking : {}),
+                      ...(serverState === "error" ? styles.statusDotError : {}),
+                    }} />
+                    <span>
+                      {serverState === "waking"
+                        ? "Backend is starting on Render"
+                        : "Backend did not respond"}
+                    </span>
+                  </div>
+                  <p style={styles.wakeNoticeText}>
+                    {serverState === "waking"
+                      ? "First visit can take about a minute while the server wakes up."
+                      : "The server may still be waking. Try again in a moment."}
+                  </p>
+                  {serverState === "error" && (
+                    <button style={styles.retryBtn} onClick={wakeUpServer}>
+                      Retry
+                    </button>
+                  )}
+                </div>
+              )}
               <p style={styles.emptySubtitle}>
                 Ask questions about your CSV data or PDF documents.<br />
                 The system automatically routes to the right engine.
@@ -407,15 +475,16 @@ export default function SmartOpsPage() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Ask a question about your data or documents..."
+              disabled={serverState !== "ready"}
               rows={1}
             />
             <button
               style={{
                 ...styles.sendBtn,
-                ...(loading || !input.trim() ? styles.sendBtnDisabled : {}),
+                ...(loading || !input.trim() || serverState !== "ready" ? styles.sendBtnDisabled : {}),
               }}
               onClick={sendMessage}
-              disabled={loading || !input.trim()}
+              disabled={loading || !input.trim() || serverState !== "ready"}
             >
               ↑
             </button>
@@ -675,12 +744,36 @@ const styles: Record<string, React.CSSProperties> = {
   topbarHint: {
     color: "#6B7280",
   },
+  serverStatus: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "6px 10px",
+    background: "#111827",
+    border: "1px solid #1F2937",
+    borderRadius: "8px",
+    color: "#9CA3AF",
+    fontSize: "12px",
+    fontWeight: 500,
+  },
   statusDot: {
     width: "8px",
     height: "8px",
     borderRadius: "50%",
     background: "#10B981",
     boxShadow: "0 0 10px rgba(16, 185, 129, 0.5)",
+  },
+  statusDotWaking: {
+    background: "#F59E0B",
+    boxShadow: "0 0 10px rgba(245, 158, 11, 0.45)",
+    animation: "pulse 1.2s ease-in-out infinite",
+  },
+  statusDotError: {
+    background: "#EF4444",
+    boxShadow: "0 0 10px rgba(239, 68, 68, 0.45)",
+  },
+  statusText: {
+    whiteSpace: "nowrap",
   },
   messages: {
     flex: 1,
@@ -717,6 +810,45 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.6,
     margin: "0 0 40px 0",
     maxWidth: "420px",
+  },
+  wakeNotice: {
+    width: "min(420px, 100%)",
+    margin: "0 0 28px 0",
+    padding: "14px 16px",
+    background: "#111827",
+    border: "1px solid #1F2937",
+    borderRadius: "8px",
+    textAlign: "left",
+  },
+  wakeNoticeError: {
+    border: "1px solid rgba(239, 68, 68, 0.35)",
+    background: "rgba(239, 68, 68, 0.06)",
+  },
+  wakeNoticeHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    color: "#E5E7EB",
+    fontSize: "13px",
+    fontWeight: 600,
+    marginBottom: "6px",
+  },
+  wakeNoticeText: {
+    color: "#9CA3AF",
+    fontSize: "12px",
+    lineHeight: 1.5,
+    margin: "0",
+  },
+  retryBtn: {
+    marginTop: "12px",
+    padding: "8px 12px",
+    background: "#1F2937",
+    border: "1px solid #374151",
+    borderRadius: "6px",
+    color: "#E5E7EB",
+    fontSize: "12px",
+    fontWeight: 600,
+    cursor: "pointer",
   },
   suggestions: {
     display: "flex",

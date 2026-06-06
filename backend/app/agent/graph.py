@@ -28,6 +28,13 @@ VAGUE_REQUESTS = {
     "what do you think", "help", "help me", "start"
 }
 
+CSV_ACTION_REQUESTS = {
+    "summary", "summarize", "summarise", "overview", "analysis",
+    "analyze", "analyse", "profile", "quick summary", "quick overview",
+    "missing values", "anomaly", "anomalies", "anomaly check",
+    "trends", "trend", "top values", "bottom values"
+}
+
 # NODE 1: SMART ROUTER
 def router_node(state: AgentState) -> AgentState:
     question = state["question"]
@@ -129,6 +136,16 @@ def router_node(state: AgentState) -> AgentState:
             # Fallback if context extraction drops out
             return {**state, "engine": "csv"}
 
+    if csv_loaded and lower_q in CSV_ACTION_REQUESTS:
+        return {
+            **state,
+            "engine": "csv",
+            "question": (
+                f"User selected this analysis task for the active CSV: {question}. "
+                "Answer it directly using the loaded dataframe."
+            )
+        }
+
     if lower_q in VAGUE_REQUESTS:
         if csv_loaded:
             return {
@@ -158,10 +175,44 @@ def router_node(state: AgentState) -> AgentState:
     CSV File Loaded in Memory: {csv_loaded}
     
     Rules:
-    - If vague (e.g., "analyze this", "summarize"): set is_clear=False, engine="clarify", and write a helpful clarification_message offering specific options.
-    - CRITICAL: If 'CSV File Loaded in Memory' is True, your clarification message MUST NOT say the file is missing. You must acknowledge that the data is ready and offer options!
-    - If specific (e.g., "what is the total revenue"): set is_clear=True, and set engine to "csv" (data) or "pdf" (text).
-    - If no history and it's a greeting, set engine="clarify" and say hello.
+    1. Conversational continuity / turn-taking:
+       - Always read Recent Conversation History before judging the current request.
+       - If the assistant's last message offered specific options such as summary,
+         overview, anomaly check, missing values, trends, top/bottom values, or
+         document sections, and the Current User Request is a short selection of
+         one of those options, treat it as a specific request.
+       - In that case set is_clear=True. Do NOT ask for clarification again.
+       - Route to csv if the selected option is about data/table analysis.
+       - Route to pdf if the selected option is about document/PDF content.
+
+    2. Bias towards action:
+       - If CSV File Loaded in Memory is True and the user asks for a general
+         "summary", "overview", "analysis", "analyze", "profile", "missing
+         values", "trends", or "anomaly check", set is_clear=True and
+         engine="csv". The pandas engine can handle broad CSV analysis.
+       - Do not route broad CSV requests to clarify when a CSV is loaded.
+
+    3. File awareness:
+       - If CSV File Loaded in Memory is True, any clarification_message must
+         never claim that no CSV, dataset, data, table, or file is provided.
+       - If clarification is truly needed while CSV is loaded, acknowledge that
+         the CSV is ready and ask which analysis to run.
+
+    4. Missing file behavior:
+       - If the user asks for CSV/data analysis and CSV File Loaded in Memory is
+         False, set is_clear=False, engine="clarify", and ask them to upload a CSV.
+       - If the user asks a document/PDF question without useful PDF context in
+         history, choose pdf only if the request is clearly document-oriented.
+
+    5. Specific requests:
+       - If specific (e.g., "what is the total revenue", "which region has the
+         highest sales", "what does the policy say about leave"), set
+         is_clear=True and choose csv for tabular/data questions or pdf for
+         document/text questions.
+
+    6. Greetings:
+       - If no file context and the user is only greeting, set is_clear=False,
+         engine="clarify", and briefly invite them to upload a CSV or PDF.
     """
     
     try:
@@ -264,6 +315,36 @@ def composer_node(state: AgentState) -> AgentState:
 
     raw_answer = state.get("answer", "")
     engine = state.get("engine", "unknown")
+    question = state.get("question", "").lower()
+
+    def optional_follow_up() -> str:
+        """
+        Keep conversation clean. Ask a follow-up only when the user's current
+        question naturally points to a next step; otherwise stay quiet.
+        """
+        if engine == "csv":
+            if any(word in question for word in ["summary", "overview", "profile", "analysis", "analyze", "analyse"]):
+                return "Do you want me to check missing values or unusual records next?"
+            if any(word in question for word in ["total", "sum", "revenue", "sales", "amount"]):
+                return "Do you want the same metric grouped by category or date?"
+            if any(word in question for word in ["top", "highest", "best", "maximum", "max"]):
+                return "Do you want to see the bottom values too?"
+            if any(word in question for word in ["bottom", "lowest", "worst", "minimum", "min"]):
+                return "Do you want to see the top values too?"
+            if any(word in question for word in ["missing", "null", "empty", "blank"]):
+                return "Do you want me to show the rows affected by those missing values?"
+            return ""
+
+        if engine == "pdf":
+            if any(word in question for word in ["summary", "summarize", "summarise", "overview", "key points"]):
+                return "Do you want me to list the risks or action items from it?"
+            if any(word in question for word in ["policy", "rule", "requirement", "condition"]):
+                return "Do you want me to check the exceptions or related clauses?"
+            if any(word in question for word in ["risk", "issue", "problem"]):
+                return "Do you want me to turn those into action items?"
+            return ""
+
+        return ""
 
     if engine == "csv":
         row_count = state.get("rows_in_file")
@@ -272,18 +353,21 @@ def composer_node(state: AgentState) -> AgentState:
             if row_count
             else "I checked this against the active CSV dataset."
         )
-        follow_up = "Want me to break it down by category, date, or top/bottom values?"
     elif engine == "pdf":
         sources = state.get("sources") or []
         source_text = f" Source: {', '.join(sources)}." if sources else ""
         explanation = f"I used the most relevant document chunks from your uploaded PDF.{source_text}"
-        follow_up = "Want me to summarize the key points or check another section?"
     else:
         return state
 
+    follow_up = optional_follow_up()
+    final_answer = f"{raw_answer}\n\n_{explanation}_"
+    if follow_up:
+        final_answer += f"\n\n{follow_up}"
+
     return {
         **state,
-        "answer": f"{raw_answer}\n\n_{explanation}_\n\n{follow_up}"
+        "answer": final_answer
     }
     
     
@@ -300,9 +384,17 @@ def clarify_node(state: AgentState) -> AgentState:
     """
     Bypasses the processing engines and asks the user for more details.
     """
+    answer = state.get("answer") or "I can help with CSV analysis or PDF questions. Please upload a file or ask a more specific question."
+    try:
+        from app.memory.session import add_message
+        add_message(state.get("session_id", "default"), "user", state.get("question", ""))
+        add_message(state.get("session_id", "default"), "assistant", answer)
+    except Exception:
+        pass
+
     return {
         **state,
-        "answer": state.get("answer") or "I can help with CSV analysis or PDF questions. Please upload a file or ask a more specific question.",
+        "answer": answer,
         "status": "success" 
     }
 
