@@ -15,5 +15,7 @@ class AgentState(TypedDict):
     sources: Optional[list]    # Source documents used
     chunks_used: NotRequired[int]  # Number of document chunks used for PDF answers
     contexts: NotRequired[list]    # Retrieved context chunks for evaluation/debug views
+    retrieval_scores: NotRequired[list]  # Similarity scores returned by PDF retrieval
+    best_score: NotRequired[float]       # Highest PDF retrieval score
     status: Optional[str]      # "success" or "error"
     error: Optional[str]       # Error message if any

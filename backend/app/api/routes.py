@@ -72,6 +72,8 @@ async def ask(
         "sources": None,
         "chunks_used": 0,
         "contexts": [],
+        "retrieval_scores": [],
+        "best_score": None,
         "status": None,
         "error": None
     })
@@ -84,6 +86,8 @@ async def ask(
         "sources": result.get("sources") or [],
         "chunks_used": result.get("chunks_used", 0),
         "contexts": result.get("contexts", []),
+        "retrieval_scores": result.get("retrieval_scores", []),
+        "best_score": result.get("best_score"),
         "session_id": session_id,
         "error": result.get("error")
     }

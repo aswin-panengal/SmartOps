@@ -295,6 +295,8 @@ def pdf_node(state: AgentState) -> AgentState:
             "sources": result.get("sources", []),
             "chunks_used": result.get("chunks_used", 0),
             "contexts": result.get("contexts", []),
+            "retrieval_scores": result.get("retrieval_scores", []),
+            "best_score": result.get("best_score"),
             "status": "success"
         }
     else:
