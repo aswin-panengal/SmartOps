@@ -1,5 +1,5 @@
 # Python Tracking Exclusions (Monorepo Safe)
-**/venv/
+**/.venv/
 **/.env
 **/__pycache__/
 *.pyc

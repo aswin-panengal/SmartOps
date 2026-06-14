@@ -37,17 +37,33 @@ interface UploadedFile {
   file: File;
 }
 
+interface ChatSession {
+  id: string;
+  displayName: string;
+  uploadedFile: UploadedFile | null;
+  isFileIngested: boolean;
+  messages: Message[];
+  loading: boolean;
+}
+
+// Generate a single stable initial ID to share across both initialization states on cold boot
+const initialId = `session-${Date.now()}`;
+
 export default function SmartOpsPage() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  // Fixes the duplicate session bug by ensuring the array is never born empty
+  const [sessions, setSessions] = useState<ChatSession[]>([
+    {
+      id: initialId,
+      displayName: "✨ New Interactive Context",
+      uploadedFile: null,
+      isFileIngested: false,
+      messages: [],
+      loading: false,
+    },
+  ]);
+  const [activeSessionId, setActiveSessionId] = useState<string>(initialId);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
   const [serverState, setServerState] = useState<ServerState>("waking");
-
-  // NETWORK LOCK: Prevents uploading the same file multiple times
-  const [isFileIngested, setIsFileIngested] = useState(false);
-
-  const [sessionId, setSessionId] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -55,13 +71,55 @@ export default function SmartOpsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => {
-    setSessionId(`session-${Date.now()}`);
+  // Derive all active state parameters cleanly based on the selected workspace pointer
+  const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
+  const uploadedFile = activeSession?.uploadedFile || null;
+  const isFileIngested = activeSession?.isFileIngested || false;
+  const messages = activeSession?.messages || [];
+
+  // Utility helper to handle granular message state shifts inside a focused array context
+  const setMessages = (updateFn: (prev: Message[]) => Message[]) => {
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === activeSessionId ? { ...s, messages: updateFn(s.messages) } : s
+      )
+    );
+  };
+
+  const setIsFileIngested = (val: boolean) => {
+    setSessions((prev) =>
+      prev.map((s) => (s.id === activeSessionId ? { ...s, isFileIngested: val } : s))
+    );
+  };
+
+  // Metadata-driven workspace title display rules
+  const getSessionDisplayName = (file: UploadedFile | null, firstQuery?: string) => {
+    if (file) {
+      const cleanName = file.name.replace(/\.[^/.]+$/, "");
+      return `${file.type === "csv" ? "📊" : "📄"} ${cleanName}`;
+    }
+    if (firstQuery) {
+      return `💬 ${firstQuery.trim().substring(0, 18)}${firstQuery.trim().length > 18 ? "..." : ""}`;
+    }
+    return "✨ New Interactive Context";
+  };
+
+  const createNewSession = useCallback((file: UploadedFile | null = null) => {
+    const newId = `session-${Date.now()}`;
+    const newSession: ChatSession = {
+      id: newId,
+      displayName: getSessionDisplayName(file),
+      uploadedFile: file,
+      isFileIngested: false,
+      messages: [],
+      loading: false,
+    };
+    setSessions((prev) => [...prev, newSession]);
+    setActiveSessionId(newId);
   }, []);
 
   const wakeUpServer = useCallback(async () => {
     setServerState("waking");
-
     try {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 90000);
@@ -93,8 +151,20 @@ export default function SmartOpsPage() {
       alert("Only CSV and PDF files are supported.");
       return;
     }
-    setUploadedFile({ name: file.name, type: ext as "csv" | "pdf", file });
-    setIsFileIngested(false); // Reset network lock for the new file
+    const fileObj: UploadedFile = { name: file.name, type: ext as "csv" | "pdf", file };
+
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === activeSessionId
+          ? {
+            ...s,
+            uploadedFile: fileObj,
+            isFileIngested: false,
+            displayName: getSessionDisplayName(fileObj),
+          }
+          : s
+      )
+    );
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -105,7 +175,8 @@ export default function SmartOpsPage() {
   };
 
   const sendMessage = async () => {
-    if (!input.trim() || loading || serverState !== "ready") return;
+    // Reads performance-critical loading flag from isolated workspace item map
+    if (!input.trim() || activeSession?.loading || serverState !== "ready") return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -114,18 +185,24 @@ export default function SmartOpsPage() {
       timestamp: new Date(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    const isFirstQuery = messages.length === 0;
+
+    // Locks down the typing loading status strictly within the current session block array
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === activeSessionId
+          ? { ...s, messages: [...s.messages, userMessage], loading: true }
+          : s
+      )
+    );
+
     setInput("");
-    setLoading(true);
 
     try {
       const formData = new FormData();
       formData.append("question", userMessage.content);
-      formData.append("session_id", sessionId);
+      formData.append("session_id", activeSessionId);
 
-      // SMART NETWORK LOCK:
-      // Both PDFs and CSVs are now cached on the backend (in Qdrant and RAM respectively).
-      // We only ever need to send the heavy file payload once per session.
       if (uploadedFile && !isFileIngested) {
         formData.append("file", uploadedFile.file);
       }
@@ -134,7 +211,7 @@ export default function SmartOpsPage() {
         method: "POST",
         body: formData,
       });
-      // If the request succeeds, lock the file state so it isn't sent on the next turn
+
       if (res.ok) {
         setIsFileIngested(true);
       }
@@ -152,20 +229,43 @@ export default function SmartOpsPage() {
         timestamp: new Date(),
       };
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      // Clear loading state and deliver payload purely to the operational source workspace context
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === activeSessionId
+            ? {
+              ...s,
+              messages: [...s.messages, assistantMessage],
+              loading: false,
+              displayName: !s.uploadedFile && isFirstQuery
+                ? getSessionDisplayName(null, userMessage.content)
+                : s.displayName,
+            }
+            : s
+        )
+      );
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: "Failed to connect to SmartOps backend. Make sure your server is running.",
-          error: true,
-          timestamp: new Date(),
-        },
-      ]);
-    } finally {
-      setLoading(false);
+      // Clear loading state on fail conditions cleanly within the workspace pointer boundary
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === activeSessionId
+            ? {
+              ...s,
+              messages: [
+                ...s.messages,
+                {
+                  id: (Date.now() + 1).toString(),
+                  role: "assistant",
+                  content: "Failed to connect to SmartOps backend. Make sure your server is running.",
+                  error: true,
+                  timestamp: new Date(),
+                },
+              ],
+              loading: false,
+            }
+            : s
+        )
+      );
     }
   };
 
@@ -176,22 +276,64 @@ export default function SmartOpsPage() {
     }
   };
 
-  const clearChat = async () => {
-    // 1. Wipe frontend UI application component states instantly
-    setMessages([]);
-    setUploadedFile(null);
-    setIsFileIngested(false);
+  const deleteSession = async (idToDelete: string, e: React.MouseEvent) => {
+    e.stopPropagation();
 
-    // 2. Synchronize memory state with the backend server API router
-    if (sessionId) {
+    try {
+      await fetch(`${API_BASE}/api/session/${idToDelete}`, {
+        method: "DELETE",
+      });
+    } catch (err) {
+      console.error("Failed to sync session termination state to backend cache:", err);
+    }
+
+    const remaining = sessions.filter((s) => s.id !== idToDelete);
+    setSessions(remaining);
+
+    if (activeSessionId === idToDelete) {
+      if (remaining.length > 0) {
+        setActiveSessionId(remaining[remaining.length - 1].id);
+      } else {
+        const fallbackId = `session-${Date.now()}`;
+        setSessions([
+          {
+            id: fallbackId,
+            displayName: "✨ New Interactive Context",
+            uploadedFile: null,
+            isFileIngested: false,
+            messages: [],
+            loading: false,
+          },
+        ]);
+        setActiveSessionId(fallbackId);
+      }
+    }
+  };
+
+  const clearChat = async () => {
+    if (activeSessionId) {
       try {
-        await fetch(`${API_BASE}/api/session/${sessionId}`, {
+        await fetch(`${API_BASE}/api/session/${activeSessionId}`, {
           method: "DELETE",
         });
-        console.log(`Session context ${sessionId} successfully cleared from core memory.`);
       } catch (err) {
-        console.error("Failed to sync session termination state to the API cluster endpoint:", err);
+        console.error("Failed to wipe active backend session memory cache:", err);
       }
+
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === activeSessionId
+            ? {
+              ...s,
+              uploadedFile: null,
+              isFileIngested: false,
+              messages: [],
+              loading: false,
+              displayName: "✨ New Interactive Context",
+            }
+            : s
+        )
+      );
     }
   };
 
@@ -202,11 +344,10 @@ export default function SmartOpsPage() {
     <div style={styles.root}>
       <style dangerouslySetInnerHTML={{ __html: globalStyles }} />
 
-      {/* Sidebar */}
+      {/* Sidebar Layout */}
       <aside style={{ ...styles.sidebar, ...(sidebarOpen ? {} : styles.sidebarClosed) }}>
         <div style={styles.sidebarHeader}>
           <div style={styles.logo}>
-            {/* SAFELY ENCODED GLYPH */}
             <span style={styles.logoIcon}>{"\u2318"}</span>
             <span style={styles.logoText}>SmartOps</span>
           </div>
@@ -215,11 +356,15 @@ export default function SmartOpsPage() {
           </button>
         </div>
 
+        {/* Upload Slot */}
         <div style={styles.sidebarSection}>
-          <p style={styles.sectionLabel}>UPLOAD FILE</p>
+          <p style={styles.sectionLabel}>UPLOAD CONTEXT FILE</p>
           <div
             style={{ ...styles.dropzone, ...(dragOver ? styles.dropzoneActive : {}) }}
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
             onDragLeave={() => setDragOver(false)}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
@@ -233,18 +378,40 @@ export default function SmartOpsPage() {
             />
             {uploadedFile ? (
               <div style={styles.uploadedFile}>
-                <span style={{
-                  ...styles.fileTypeBadge,
-                  background: uploadedFile.type === "csv" ? "rgba(16, 185, 129, 0.1)" : "rgba(59, 130, 246, 0.1)",
-                  color: uploadedFile.type === "csv" ? "#34D399" : "#60A5FA",
-                  border: uploadedFile.type === "csv" ? "1px solid rgba(16, 185, 129, 0.2)" : "1px solid rgba(59, 130, 246, 0.2)",
-                }}>
+                <span
+                  style={{
+                    ...styles.fileTypeBadge,
+                    background:
+                      uploadedFile.type === "csv"
+                        ? "rgba(16, 185, 129, 0.1)"
+                        : "rgba(59, 130, 246, 0.1)",
+                    color: uploadedFile.type === "csv" ? "#34D399" : "#60A5FA",
+                    border:
+                      uploadedFile.type === "csv"
+                        ? "1px solid rgba(16, 185, 129, 0.2)"
+                        : "1px solid rgba(59, 130, 246, 0.2)",
+                  }}
+                >
                   {uploadedFile.type.toUpperCase()}
                 </span>
                 <span style={styles.fileName}>{uploadedFile.name}</span>
                 <button
                   style={styles.removeBtn}
-                  onClick={(e) => { e.stopPropagation(); setUploadedFile(null); setIsFileIngested(false); }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSessions((prev) =>
+                      prev.map((s) =>
+                        s.id === activeSessionId
+                          ? {
+                            ...s,
+                            uploadedFile: null,
+                            isFileIngested: false,
+                            displayName: "✨ New Interactive Context",
+                          }
+                          : s
+                      )
+                    );
+                  }}
                 >
                   ✕
                 </button>
@@ -252,45 +419,103 @@ export default function SmartOpsPage() {
             ) : (
               <div style={styles.dropzoneEmpty}>
                 <span style={styles.dropzoneIcon}>↑</span>
-                <p style={styles.dropzoneText}>Drop CSV or PDF here</p>
-                <p style={styles.dropzoneHint}>or click to browse</p>
+                <p style={styles.dropzoneText}>Drop CSV or PDF context</p>
+                <p style={styles.dropzoneHint}>or click to select</p>
               </div>
             )}
           </div>
         </div>
 
-        <div style={styles.sidebarSection}>
-          <p style={styles.sectionLabel}>ENGINES</p>
-          <div style={styles.engineCard}>
-            <div style={styles.engineDot} />
-            <div>
-              <p style={styles.engineName}>Analytical Engine</p>
-              <p style={styles.engineDesc}>CSV · tabular data · pandas</p>
-            </div>
+        {/* Dynamic Parallel Active Workspaces Nav */}
+        <div style={{ ...styles.sidebarSection, flex: 1, overflowY: "auto", borderBottom: "none" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "14px" }}>
+            <p style={{ ...styles.sectionLabel, margin: 0 }}>ACTIVE WORKSPACES</p>
+            <button
+              style={{
+                background: "#1F2937",
+                border: "none",
+                color: "#F3F4F6",
+                width: "22px",
+                height: "22px",
+                borderRadius: "6px",
+                cursor: "pointer",
+                fontSize: "14px",
+                fontWeight: "bold",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "all 0.2s",
+              }}
+              onClick={() => createNewSession(null)}
+              title="Spawn a clean parallel workspace context"
+              className="plus-session-btn"
+            >
+              +
+            </button>
           </div>
-          <div style={styles.engineCard}>
-            <div style={{ ...styles.engineDot, background: "#3B82F6", boxShadow: "0 0 8px rgba(59,130,246,0.4)" }} />
-            <div>
-              <p style={styles.engineName}>Semantic Engine</p>
-              <p style={styles.engineDesc}>PDF · RAG · Qdrant</p>
-            </div>
-          </div>
-        </div>
 
-        <div style={styles.sidebarSection}>
-          <p style={styles.sectionLabel}>SESSION</p>
-          <p style={styles.sessionId}>{sessionId ? `${sessionId.slice(0, 20)}...` : "Initializing..."}</p>
-          <p style={styles.messageCount}>{messages.length} messages</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            {sessions.map((session) => {
+              const isActive = session.id === activeSessionId;
+              return (
+                <div
+                  key={session.id}
+                  onClick={() => setActiveSessionId(session.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "10px 12px",
+                    borderRadius: "8px",
+                    cursor: "pointer",
+                    background: isActive ? "#111827" : "transparent",
+                    border: isActive ? "1px solid #374151" : "1px solid transparent",
+                    transition: "all 0.15s ease",
+                  }}
+                  className="session-row-item"
+                >
+                  <span
+                    style={{
+                      fontSize: "13px",
+                      fontWeight: isActive ? 600 : 500,
+                      color: isActive ? "#F9FAFB" : "#9CA3AF",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      flex: 1,
+                    }}
+                  >
+                    {session.displayName}
+                  </span>
+                  <button
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      color: "#4B5563",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      marginLeft: "8px",
+                      padding: "2px",
+                    }}
+                    onClick={(e) => deleteSession(session.id, e)}
+                    className="session-close-btn"
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         <div style={styles.sidebarFooter}>
           <button style={styles.clearBtn} onClick={clearChat}>
-            Clear conversation
+            Reset current session
           </button>
         </div>
       </aside>
 
-      {/* Main */}
+      {/* Main Framework Block */}
       <main style={styles.main}>
         {/* Topbar */}
         <header style={styles.topbar}>
@@ -302,28 +527,38 @@ export default function SmartOpsPage() {
           <div style={styles.topbarTitle}>
             {uploadedFile ? (
               <span style={styles.topbarFile}>
-                <span style={{
-                  ...styles.fileTypeBadge,
-                  fontSize: "10px",
-                  padding: "2px 6px",
-                  background: uploadedFile.type === "csv" ? "rgba(16, 185, 129, 0.1)" : "rgba(59, 130, 246, 0.1)",
-                  color: uploadedFile.type === "csv" ? "#34D399" : "#60A5FA",
-                  border: uploadedFile.type === "csv" ? "1px solid rgba(16, 185, 129, 0.2)" : "1px solid rgba(59, 130, 246, 0.2)",
-                }}>
+                <span
+                  style={{
+                    ...styles.fileTypeBadge,
+                    fontSize: "10px",
+                    padding: "2px 6px",
+                    background:
+                      uploadedFile.type === "csv"
+                        ? "rgba(16, 185, 129, 0.1)"
+                        : "rgba(59, 130, 246, 0.1)",
+                    color: uploadedFile.type === "csv" ? "#34D399" : "#60A5FA",
+                    border:
+                      uploadedFile.type === "csv"
+                        ? "1px solid rgba(16, 185, 129, 0.2)"
+                        : "1px solid rgba(59, 130, 246, 0.2)",
+                  }}
+                >
                   {uploadedFile.type.toUpperCase()}
                 </span>
                 {uploadedFile.name}
               </span>
             ) : (
-              <span style={styles.topbarHint}>Interactive Data Workspace</span>
+              <span style={styles.topbarHint}>Interactive Sandbox Workspace</span>
             )}
           </div>
           <div style={styles.serverStatus}>
-            <span style={{
-              ...styles.statusDot,
-              ...(serverState === "waking" ? styles.statusDotWaking : {}),
-              ...(serverState === "error" ? styles.statusDotError : {}),
-            }} />
+            <span
+              style={{
+                ...styles.statusDot,
+                ...(serverState === "waking" ? styles.statusDotWaking : {}),
+                ...(serverState === "error" ? styles.statusDotError : {}),
+              }}
+            />
             <span style={styles.statusText}>
               {serverState === "ready"
                 ? "Ready"
@@ -334,23 +569,27 @@ export default function SmartOpsPage() {
           </div>
         </header>
 
-        {/* Messages */}
+        {/* Messaging Logs Node */}
         <div style={styles.messages}>
           {messages.length === 0 ? (
             <div style={styles.emptyState}>
               <div style={styles.emptyIcon}>{"\u2318"}</div>
               <h2 style={styles.emptyTitle}>SmartOps Intelligence</h2>
               {serverState !== "ready" && (
-                <div style={{
-                  ...styles.wakeNotice,
-                  ...(serverState === "error" ? styles.wakeNoticeError : {}),
-                }}>
+                <div
+                  style={{
+                    ...styles.wakeNotice,
+                    ...(serverState === "error" ? styles.wakeNoticeError : {}),
+                  }}
+                >
                   <div style={styles.wakeNoticeHeader}>
-                    <span style={{
-                      ...styles.statusDot,
-                      ...(serverState === "waking" ? styles.statusDotWaking : {}),
-                      ...(serverState === "error" ? styles.statusDotError : {}),
-                    }} />
+                    <span
+                      style={{
+                        ...styles.statusDot,
+                        ...(serverState === "waking" ? styles.statusDotWaking : {}),
+                        ...(serverState === "error" ? styles.statusDotError : {}),
+                      }}
+                    />
                     <span>
                       {serverState === "waking"
                         ? "Backend is starting on Render"
@@ -370,8 +609,9 @@ export default function SmartOpsPage() {
                 </div>
               )}
               <p style={styles.emptySubtitle}>
-                Ask questions about your CSV data or PDF documents.<br />
-                The system automatically routes to the right engine.
+                Ask questions about your CSV data or PDF documents.
+                <br />
+                The system automatically paths to the optimized isolated execution sandbox.
               </p>
               <div style={styles.suggestions}>
                 {[
@@ -399,15 +639,14 @@ export default function SmartOpsPage() {
                   justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
                 }}
               >
-                {msg.role === "assistant" && (
-                  <div style={styles.avatar}>{"\u2318"}</div>
-                )}
-                <div style={{
-                  ...styles.bubble,
-                  ...(msg.role === "user" ? styles.userBubble : styles.aiBubble),
-                  ...(msg.error ? styles.errorBubble : {}),
-                }}>
-
+                {msg.role === "assistant" && <div style={styles.avatar}>{"\u2318"}</div>}
+                <div
+                  style={{
+                    ...styles.bubble,
+                    ...(msg.role === "user" ? styles.userBubble : styles.aiBubble),
+                    ...(msg.error ? styles.errorBubble : {}),
+                  }}
+                >
                   {msg.role === "user" ? (
                     <p style={styles.bubbleText}>{msg.content}</p>
                   ) : (
@@ -418,18 +657,24 @@ export default function SmartOpsPage() {
 
                   {msg.engine && msg.engine !== "clarify" && (
                     <div style={styles.bubbleMeta}>
-                      <span style={{
-                        ...styles.engineBadge,
-                        background: msg.engine === "csv" ? "rgba(16, 185, 129, 0.1)" : "rgba(59, 130, 246, 0.1)",
-                        color: msg.engine === "csv" ? "#34D399" : "#60A5FA",
-                        border: msg.engine === "csv" ? "1px solid rgba(16, 185, 129, 0.2)" : "1px solid rgba(59, 130, 246, 0.2)",
-                      }}>
+                      <span
+                        style={{
+                          ...styles.engineBadge,
+                          background:
+                            msg.engine === "csv"
+                              ? "rgba(16, 185, 129, 0.1)"
+                              : "rgba(59, 130, 246, 0.1)",
+                          color: msg.engine === "csv" ? "#34D399" : "#60A5FA",
+                          border:
+                            msg.engine === "csv"
+                              ? "1px solid rgba(16, 185, 129, 0.2)"
+                              : "1px solid rgba(59, 130, 246, 0.2)",
+                        }}
+                      >
                         {msg.engine === "csv" ? "Analytical" : "Semantic"} Engine
                       </span>
                       {msg.chunks_used && (
-                        <span style={styles.chunksBadge}>
-                          {msg.chunks_used} chunks
-                        </span>
+                        <span style={styles.chunksBadge}>{msg.chunks_used} chunks</span>
                       )}
                     </div>
                   )}
@@ -438,7 +683,9 @@ export default function SmartOpsPage() {
                     <div style={styles.sources}>
                       <p style={styles.sourcesLabel}>Sources</p>
                       {msg.sources.map((src, i) => (
-                        <span key={i} style={styles.sourceTag}>{src}</span>
+                        <span key={i} style={styles.sourceTag}>
+                          {src}
+                        </span>
                       ))}
                     </div>
                   )}
@@ -449,7 +696,8 @@ export default function SmartOpsPage() {
             ))
           )}
 
-          {loading && (
+          {/* Typing Dots Animation Bubble - Scoped strictly to the active target item state */}
+          {activeSession?.loading && (
             <div style={styles.messageRow}>
               <div style={styles.avatar}>{"\u2318"}</div>
               <div style={{ ...styles.bubble, ...styles.aiBubble }}>
@@ -465,7 +713,7 @@ export default function SmartOpsPage() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input */}
+        {/* Input Text Box Frame */}
         <div style={styles.inputArea}>
           <div style={styles.inputWrapper}>
             <textarea
@@ -481,10 +729,12 @@ export default function SmartOpsPage() {
             <button
               style={{
                 ...styles.sendBtn,
-                ...(loading || !input.trim() || serverState !== "ready" ? styles.sendBtnDisabled : {}),
+                ...(activeSession?.loading || !input.trim() || serverState !== "ready"
+                  ? styles.sendBtnDisabled
+                  : {}),
               }}
               onClick={sendMessage}
-              disabled={loading || !input.trim() || serverState !== "ready"}
+              disabled={activeSession?.loading || !input.trim() || serverState !== "ready"}
             >
               ↑
             </button>
@@ -507,7 +757,8 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100vh",
     background: "#0A0A0B",
     color: "#F3F4F6",
-    fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+    fontFamily:
+      "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
     overflow: "hidden",
   },
   sidebar: {
@@ -646,47 +897,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "12px",
     padding: "4px",
     flexShrink: 0,
-  },
-  engineCard: {
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    padding: "10px 0",
-  },
-  engineDot: {
-    width: "8px",
-    height: "8px",
-    borderRadius: "50%",
-    background: "#10B981",
-    flexShrink: 0,
-    boxShadow: "0 0 8px rgba(16, 185, 129, 0.4)",
-  },
-  engineName: {
-    fontSize: "13px",
-    fontWeight: 500,
-    color: "#E5E7EB",
-    margin: "0 0 2px 0",
-  },
-  engineDesc: {
-    fontSize: "11px",
-    color: "#6B7280",
-    margin: 0,
-  },
-  sessionId: {
-    fontSize: "11px",
-    color: "#9CA3AF",
-    fontFamily: "'Fira Code', monospace",
-    margin: "0 0 6px 0",
-    background: "#111827",
-    padding: "4px 8px",
-    borderRadius: "4px",
-    border: "1px solid #1F2937",
-    display: "inline-block",
-  },
-  messageCount: {
-    fontSize: "12px",
-    color: "#6B7280",
-    margin: 0,
   },
   sidebarFooter: {
     marginTop: "auto",
@@ -1074,8 +1284,20 @@ const globalStyles = `
     box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2), 0 4px 20px rgba(0,0,0,0.2) !important;
   }
   button:hover:not(:disabled) { transform: translateY(-1px); }
+  .plus-session-btn:hover { background: #374151 !important; color: #FFFFFF !important; }
   .suggestionBtn:hover { border-color: #374151 !important; background: #1F2937 !important; }
   .clearBtn:hover { background: #1F2937 !important; color: #E5E7EB !important; border-color: #374151 !important; }
+  
+  /* Workspace List Hover Transitions */
+  .session-row-item:hover {
+    background: rgba(31, 41, 55, 0.4) !important;
+  }
+  .session-row-item:hover .session-close-btn {
+    color: #9CA3AF !important;
+  }
+  .session-close-btn:hover {
+    color: #EF4444 !important;
+  }
 
   /* Markdown Styles */
   .markdown-wrapper p { margin: 0 0 12px 0; }

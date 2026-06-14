@@ -1,5 +1,5 @@
 # Environments
-venv/
+.venv/
 
 # Secrets and Configs (NEVER UPLOAD)
 .env
@@ -16,3 +16,6 @@ qdrant_data/
 .vscode/
 .DS_Store
 Thumbs.db
+
+**/.pytest_cache/
+*.egg-info/
