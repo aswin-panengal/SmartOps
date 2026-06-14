@@ -77,15 +77,6 @@ export default function SmartOpsPage() {
   const isFileIngested = activeSession?.isFileIngested || false;
   const messages = activeSession?.messages || [];
 
-  // Utility helper to handle granular message state shifts inside a focused array context
-  const setMessages = (updateFn: (prev: Message[]) => Message[]) => {
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === activeSessionId ? { ...s, messages: updateFn(s.messages) } : s
-      )
-    );
-  };
-
   const setIsFileIngested = (val: boolean) => {
     setSessions((prev) =>
       prev.map((s) => (s.id === activeSessionId ? { ...s, isFileIngested: val } : s))
