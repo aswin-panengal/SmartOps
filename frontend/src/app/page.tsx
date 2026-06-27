@@ -70,6 +70,8 @@ export default function SmartOpsPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Held so we can abort an in-flight request when the user switches sessions
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Derive all active state parameters cleanly based on the selected workspace pointer
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
@@ -166,8 +168,12 @@ export default function SmartOpsPage() {
   };
 
   const sendMessage = async () => {
-    // Reads performance-critical loading flag from isolated workspace item map
     if (!input.trim() || activeSession?.loading || serverState !== "ready") return;
+
+    // Capture the session ID synchronously at call time. By the time the async
+    // fetch resolves, the user may have switched to a different session — all
+    // setSessions calls below use this captured ID, never the live activeSessionId.
+    const originSessionId = activeSessionId;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -178,10 +184,9 @@ export default function SmartOpsPage() {
 
     const isFirstQuery = messages.length === 0;
 
-    // Locks down the typing loading status strictly within the current session block array
     setSessions((prev) =>
       prev.map((s) =>
-        s.id === activeSessionId
+        s.id === originSessionId
           ? { ...s, messages: [...s.messages, userMessage], loading: true }
           : s
       )
@@ -189,10 +194,15 @@ export default function SmartOpsPage() {
 
     setInput("");
 
+    // Abort any previous in-flight request before starting a new one
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
       const formData = new FormData();
       formData.append("question", userMessage.content);
-      formData.append("session_id", activeSessionId);
+      formData.append("session_id", originSessionId);
 
       if (uploadedFile && !isFileIngested) {
         formData.append("file", uploadedFile.file);
@@ -201,6 +211,7 @@ export default function SmartOpsPage() {
       const res = await fetch(`${API_BASE}/api/ask`, {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       });
 
       if (res.ok) {
@@ -220,40 +231,43 @@ export default function SmartOpsPage() {
         timestamp: new Date(),
       };
 
-      // Clear loading state and deliver payload purely to the operational source workspace context
       setSessions((prev) =>
         prev.map((s) =>
-          s.id === activeSessionId
+          s.id === originSessionId
             ? {
-              ...s,
-              messages: [...s.messages, assistantMessage],
-              loading: false,
-              displayName: !s.uploadedFile && isFirstQuery
-                ? getSessionDisplayName(null, userMessage.content)
-                : s.displayName,
-            }
+                ...s,
+                messages: [...s.messages, assistantMessage],
+                loading: false,
+                displayName:
+                  !s.uploadedFile && isFirstQuery
+                    ? getSessionDisplayName(null, userMessage.content)
+                    : s.displayName,
+              }
             : s
         )
       );
-    } catch {
-      // Clear loading state on fail conditions cleanly within the workspace pointer boundary
+    } catch (err) {
+      // AbortError means the user switched sessions — discard silently
+      if (err instanceof Error && err.name === "AbortError") return;
+
       setSessions((prev) =>
         prev.map((s) =>
-          s.id === activeSessionId
+          s.id === originSessionId
             ? {
-              ...s,
-              messages: [
-                ...s.messages,
-                {
-                  id: (Date.now() + 1).toString(),
-                  role: "assistant",
-                  content: "Failed to connect to SmartOps backend. Make sure your server is running.",
-                  error: true,
-                  timestamp: new Date(),
-                },
-              ],
-              loading: false,
-            }
+                ...s,
+                messages: [
+                  ...s.messages,
+                  {
+                    id: (Date.now() + 1).toString(),
+                    role: "assistant" as const,
+                    content:
+                      "Failed to connect to SmartOps backend. Make sure your server is running.",
+                    error: true,
+                    timestamp: new Date(),
+                  },
+                ],
+                loading: false,
+              }
             : s
         )
       );
@@ -333,7 +347,6 @@ export default function SmartOpsPage() {
 
   return (
     <div style={styles.root}>
-      <style dangerouslySetInnerHTML={{ __html: globalStyles }} />
 
       {/* Sidebar Layout */}
       <aside style={{ ...styles.sidebar, ...(sidebarOpen ? {} : styles.sidebarClosed) }}>
@@ -1256,45 +1269,3 @@ const styles: Record<string, React.CSSProperties> = {
   },
 };
 
-const globalStyles = `
-  * { box-sizing: border-box; }
-  body { margin: 0; padding: 0; }
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #4B5563; }
-  .dot1 { animation-delay: 0s; }
-  .dot2 { animation-delay: 0.2s; }
-  .dot3 { animation-delay: 0.4s; }
-  @keyframes pulse {
-    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-    40% { opacity: 1; transform: scale(1.1); box-shadow: 0 0 8px rgba(59,130,246,0.5); }
-  }
-  textarea:focus {
-    border-color: #3B82F6 !important;
-    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.2), 0 4px 20px rgba(0,0,0,0.2) !important;
-  }
-  button:hover:not(:disabled) { transform: translateY(-1px); }
-  .plus-session-btn:hover { background: #374151 !important; color: #FFFFFF !important; }
-  .suggestionBtn:hover { border-color: #374151 !important; background: #1F2937 !important; }
-  .clearBtn:hover { background: #1F2937 !important; color: #E5E7EB !important; border-color: #374151 !important; }
-  
-  /* Workspace List Hover Transitions */
-  .session-row-item:hover {
-    background: rgba(31, 41, 55, 0.4) !important;
-  }
-  .session-row-item:hover .session-close-btn {
-    color: #9CA3AF !important;
-  }
-  .session-close-btn:hover {
-    color: #EF4444 !important;
-  }
-
-  /* Markdown Styles */
-  .markdown-wrapper p { margin: 0 0 12px 0; }
-  .markdown-wrapper p:last-child { margin: 0; }
-  .markdown-wrapper ul, .markdown-wrapper ol { margin: 0 0 12px 0; padding-left: 20px; }
-  .markdown-wrapper li { margin-bottom: 6px; }
-  .markdown-wrapper strong { color: #F9FAFB; font-weight: 600; }
-  .markdown-wrapper code { background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px; font-family: 'Fira Code', monospace; font-size: 12px; }
-`;

@@ -1,12 +1,13 @@
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
     app_name: str = "SmartOps Agent"
     qdrant_host: str = "localhost"
     qdrant_port: int = 6333
     qdrant_url: str = ""
     qdrant_api_key: str = ""
-    debug: bool = True
+    debug: bool = False           # SAFE default — override with DEBUG=true in dev .env only
     google_api_key: str = ""
     cors_origins: str = (
         "http://localhost:3000,"
@@ -16,13 +17,9 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins(self) -> list[str]:
-        return [
-            origin.strip()
-            for origin in self.cors_origins.split(",")
-            if origin.strip()
-        ]
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
-    class Config:
-        env_file = ".env"
+    model_config = {"env_file": ".env"}
+
 
 settings = Settings()
