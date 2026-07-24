@@ -31,9 +31,10 @@ app = FastAPI(
     version="1.0.0",
     debug=settings.debug,
     lifespan=lifespan,
-    # Disable /docs and /redoc in production to reduce attack surface
+    # Disable /docs, /redoc, and /openapi.json in production to reduce attack surface
     docs_url="/docs" if settings.debug else None,
     redoc_url="/redoc" if settings.debug else None,
+    openapi_url="/openapi.json" if settings.debug else None,
 )
 
 app.add_middleware(

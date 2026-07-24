@@ -1,3 +1,4 @@
+import ast
 import io
 import time
 import pandas as pd
@@ -21,8 +22,58 @@ _BLOCKED_PD_ATTRS = frozenset({
     "read_csv", "read_excel", "read_json", "read_sql", "read_parquet",
     "read_html", "read_clipboard", "read_feather", "read_orc",
     "read_pickle", "read_stata", "read_sas", "read_spss",
-    "DataFrame.to_csv", "DataFrame.to_sql", "DataFrame.to_excel",
 })
+
+# DataFrame/Series output methods that write to disk, network, or clipboard.
+# These live on the 'df' object itself, so _SafePandas (which only wraps the
+# 'pd' module reference) can't intercept them — they must be blocked at the
+# AST level before the generated code is ever executed.
+_BLOCKED_DF_METHODS = frozenset({
+    "to_csv", "to_excel", "to_json", "to_html", "to_hdf", "to_feather",
+    "to_parquet", "to_stata", "to_pickle", "to_sql", "to_clipboard",
+    "to_gbq", "to_markdown", "to_latex", "to_xml",
+})
+
+# Builtins that can be used to reach the object graph, filesystem, or
+# interpreter internals regardless of what's in __builtins__ (e.g. via
+# instance.__class__.__bases__[0].__subclasses__()).
+_BLOCKED_CALL_NAMES = frozenset({
+    "exec", "eval", "compile", "__import__", "getattr", "setattr",
+    "delattr", "globals", "locals", "vars", "open", "input", "help",
+})
+
+
+class _UnsafeCodeError(ValueError):
+    """Raised when generated code fails the AST safety check."""
+
+
+def _validate_generated_code(code: str) -> None:
+    """
+    Reject generated code that attempts to escape the exec() sandbox:
+    dunder attribute access (the classic __class__.__bases__ escape),
+    imports, calls to introspection/IO builtins, or DataFrame methods
+    that write to disk/network/clipboard.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        raise _UnsafeCodeError(f"Generated code has a syntax error: {e}") from e
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            raise _UnsafeCodeError("Import statements are not allowed.")
+
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__") and node.attr.endswith("__"):
+            raise _UnsafeCodeError(f"Access to '{node.attr}' is not allowed.")
+
+        if isinstance(node, ast.Name) and node.id.startswith("__") and node.id.endswith("__"):
+            raise _UnsafeCodeError(f"Access to '{node.id}' is not allowed.")
+
+        if isinstance(node, ast.Attribute) and node.attr in _BLOCKED_DF_METHODS:
+            raise _UnsafeCodeError(f"'{node.attr}' is disabled in this sandbox.")
+
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _BLOCKED_CALL_NAMES:
+            raise _UnsafeCodeError(f"Calling '{node.func.id}' is not allowed.")
 
 
 class _SafePandas:
@@ -174,6 +225,7 @@ Rules:
             generated_code = generated_code.strip()
 
             try:
+                _validate_generated_code(generated_code)
                 exec(generated_code, safe_globals, local_vars)  # noqa: S102
 
                 raw_result = local_vars.get("result")

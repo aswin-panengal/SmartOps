@@ -50,9 +50,10 @@ def api_status():
 async def analyze_csv(
     file: UploadFile = File(...),
     question: str = Form(...),
+    session_id: str = Form(default="default"),
 ):
     file_bytes = await _read_upload(file)
-    result = await run_in_threadpool(run_analytical_engine, file_bytes, question)
+    result = await run_in_threadpool(run_analytical_engine, file_bytes, question, session_id)
     err = result.get("error") or ""
     if result.get("status") == "error" and _is_rate_limit_error(err):
         return _rate_limit_reply(question)
