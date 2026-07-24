@@ -9,11 +9,19 @@ from app.engines.semantic import ensure_collection_exists, qdrant
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """
-    Bootstrap Qdrant collection at startup so the first ingest/query request
-    never races to create it, and so startup failures surface immediately
-    rather than on the first user request.
+    Best-effort Qdrant bootstrap at startup.
+    Failures are logged but never crash the server — Render's free tier
+    can have cold-start network delays, and Qdrant Cloud can be briefly
+    unreachable. The collection check retries automatically on the first
+    real request via ensure_collection_exists()'s module flag.
     """
-    ensure_collection_exists()
+    try:
+        ensure_collection_exists()
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Qdrant not reachable at startup (will retry on first request): %s", exc
+        )
     yield
 
 
