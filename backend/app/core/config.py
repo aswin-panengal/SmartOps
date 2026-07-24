@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -15,6 +16,19 @@ class Settings(BaseSettings):
         "https://smart-7iqexaluz-aswin-panengals-projects.vercel.app,"
         "https://smart-ops-git-main-aswin-panengals-projects.vercel.app"
     )
+
+    # Env vars pasted into dashboards (Render, Vercel, ...) can pick up a
+    # trailing newline or stray whitespace with no visible sign of it — that
+    # alone is enough to corrupt an HTTP client's request line/host header.
+    # Strip every string field so a stray "\n" can't silently break requests.
+    @field_validator(
+        "app_name", "qdrant_host", "qdrant_url", "qdrant_api_key",
+        "google_api_key", "cors_origins",
+        mode="before",
+    )
+    @classmethod
+    def _strip_whitespace(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
     @property
     def allowed_origins(self) -> list[str]:
