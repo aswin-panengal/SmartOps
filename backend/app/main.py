@@ -1,9 +1,12 @@
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.routes import router
 from app.engines.semantic import ensure_collection_exists, qdrant
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -15,11 +18,14 @@ async def lifespan(_app: FastAPI):
     unreachable. The collection check retries automatically on the first
     real request via ensure_collection_exists()'s module flag.
     """
+    # No secrets in qdrant_url (the api key is a separate field) — safe to log
+    # in full. This makes misconfigured env vars visible in deploy logs
+    # instead of requiring guesswork from generic connection errors.
+    logger.warning("Resolved QDRANT_URL at startup: %r", settings.qdrant_url or "(empty — using qdrant_host/qdrant_port)")
     try:
         ensure_collection_exists()
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "Qdrant not reachable at startup (will retry on first request): %s", exc
         )
     yield
