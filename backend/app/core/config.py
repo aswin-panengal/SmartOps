@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     cors_origins: str = (
         "http://localhost:3000,"
+        "https://smart-ops-eight.vercel.app,"
         "https://smart-7iqexaluz-aswin-panengals-projects.vercel.app,"
         "https://smart-ops-git-main-aswin-panengals-projects.vercel.app"
     )
