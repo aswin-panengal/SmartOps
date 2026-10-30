@@ -28,10 +28,18 @@ llm = ChatGoogleGenerativeAI(
     temperature=0,
 )
 
+# Keep imports offline. The lifespan bootstrap and PDF requests perform the
+# bounded connectivity checks, without making CSV/chat depend on Qdrant.
 if settings.qdrant_url:
-    qdrant = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
+    qdrant = QdrantClient(
+        url=settings.qdrant_url, api_key=settings.qdrant_api_key,
+        timeout=10, check_compatibility=False,
+    )
 else:
-    qdrant = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+    qdrant = QdrantClient(
+        host=settings.qdrant_host, port=settings.qdrant_port,
+        timeout=10, check_compatibility=False,
+    )
 
 COLLECTION_NAME = "smartops_documents_v2"
 VECTOR_SIZE = 768

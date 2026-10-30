@@ -60,7 +60,14 @@ def root():
 
 
 @app.get("/health")
-def health_check(response: Response):
+def health_check():
+    """Liveness for Render/Docker; PDF storage must not take CSV/chat offline."""
+    return {"status": "healthy", "app": settings.app_name}
+
+
+@app.get("/health/ready")
+def readiness_check(response: Response):
+    """Full dependency diagnostic for operations that require PDF storage."""
     try:
         qdrant.get_collections()
         return {"status": "healthy", "qdrant": "connected", "app": settings.app_name}

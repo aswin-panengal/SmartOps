@@ -18,7 +18,8 @@ class AvailabilityTests(unittest.TestCase):
             patch("app.main.qdrant.get_collections", side_effect=ConnectionError),
             TestClient(app) as client,
         ):
-            self.assertEqual(client.get("/health").status_code, 503)
+            self.assertEqual(client.get("/health").status_code, 200)
+            self.assertEqual(client.get("/health/ready").status_code, 503)
             response = client.get(
                 "/api/status",
                 headers={"Origin": "https://smart-ops-eight.vercel.app"},

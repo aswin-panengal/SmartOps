@@ -68,10 +68,11 @@ SmartOps is a full-stack AI operations assistant that combines tabular CSV analy
 
 ### Availability and deployment checks
 
-- Use `/api/status` for API liveness and the Render health check path. It stays
-  available when PDF storage is down, so chat and CSV analysis can still run.
-- `/health` is a dependency diagnostic: it returns 503 when Qdrant is unreachable.
-  A 503 here does not mean the entire API is offline.
+- Use `/health` for Render/Docker liveness and `/api/status` for frontend
+  availability. Both stay available when PDF storage is down, so chat and CSV
+  analysis can still run.
+- `/health/ready` is a dependency diagnostic: it returns 503 when Qdrant is
+  unreachable. A 503 here does not mean the entire API is offline.
 - PDF ingestion and search require the configured Qdrant Cloud cluster to be
   running and reachable. If both 443 and 6333 reset connections, check the cluster
   status and endpoint in Qdrant Cloud before changing application settings.
