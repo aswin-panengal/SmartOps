@@ -134,5 +134,8 @@ async def ask(
         "status": result.get("status"),
         "question": question,
         "answer": result.get("answer"),
+        "error": result.get("error"),
+        "engine_used": result.get("engine"),
+        "chunks_used": result.get("chunks_used", 0),
         "sources": result.get("sources") or ([f"source: {filename}"] if filename else []),
     }

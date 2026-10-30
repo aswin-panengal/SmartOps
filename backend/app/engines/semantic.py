@@ -1,4 +1,5 @@
 import io
+import logging
 import uuid
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
@@ -8,6 +9,8 @@ from qdrant_client.http import models
 from qdrant_client.models import PointStruct, VectorParams, Distance
 from qdrant_client.http.exceptions import UnexpectedResponse
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 MAX_PDF_BYTES = 50 * 1024 * 1024  # 50 MB hard limit
 EMBED_BATCH_SIZE = 50              # chunks per embedding API call
@@ -110,7 +113,14 @@ def ingest_pdf(file_bytes: bytes, filename: str, session_id: str) -> dict:
                 "error": f"PDF exceeds the {MAX_PDF_BYTES // (1024*1024)} MB limit.",
             }
 
-        ensure_collection_exists()
+        try:
+            ensure_collection_exists()
+        except Exception:
+            logger.exception("PDF storage unavailable during ingestion")
+            return {
+                "status": "error",
+                "error": "PDF storage is temporarily unavailable. Please retry your upload later. CSV analysis is still available.",
+            }
 
         try:
             text = extract_text_from_pdf(file_bytes)
@@ -166,7 +176,14 @@ def query_pdf(question: str, session_id: str = "default") -> dict:
         from app.memory.session import build_context_for_prompt, add_message
 
         # Collection must exist; if called after ingest it's already flagged ready.
-        ensure_collection_exists()
+        try:
+            ensure_collection_exists()
+        except Exception:
+            logger.exception("PDF storage unavailable during query")
+            return {
+                "status": "error",
+                "error": "PDF storage is temporarily unavailable. Please try again later. CSV analysis is still available.",
+            }
 
         conversation_context = build_context_for_prompt(session_id)
         question_vector = embedder.embed_query(question)

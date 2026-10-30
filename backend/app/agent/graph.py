@@ -61,7 +61,8 @@ def router_node(state: AgentState) -> AgentState:
                 return {
                     **state,
                     "engine": "clarify",
-                    "answer": ingest_result.get(
+                    "status": "error",
+                    "error": ingest_result.get(
                         "error",
                         "I could not read that PDF. Please try a text-based PDF or upload a clearer file."
                     )
@@ -386,6 +387,9 @@ def clarify_node(state: AgentState) -> AgentState:
     """
     Bypasses the processing engines and asks the user for more details.
     """
+    if state.get("status") == "error":
+        return state
+
     answer = state.get("answer") or "I can help with CSV analysis or PDF questions. Please upload a file or ask a more specific question."
     try:
         from app.memory.session import add_message

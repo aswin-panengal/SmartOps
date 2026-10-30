@@ -79,12 +79,6 @@ export default function SmartOpsPage() {
   const isFileIngested = activeSession?.isFileIngested || false;
   const messages = activeSession?.messages || [];
 
-  const setIsFileIngested = (val: boolean) => {
-    setSessions((prev) =>
-      prev.map((s) => (s.id === activeSessionId ? { ...s, isFileIngested: val } : s))
-    );
-  };
-
   // Metadata-driven workspace title display rules
   const getSessionDisplayName = (file: UploadedFile | null, firstQuery?: string) => {
     if (file) {
@@ -113,20 +107,22 @@ export default function SmartOpsPage() {
 
   const wakeUpServer = useCallback(async () => {
     setServerState("waking");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 90000);
     try {
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 90000);
-
-      const res = await fetch(`${API_BASE}/health`, {
+      // /health checks Qdrant too. A PDF storage outage must not disable
+      // chat and CSV analysis when the API itself is still available.
+      const res = await fetch(`${API_BASE}/api/status`, {
         method: "GET",
         cache: "no-store",
         signal: controller.signal,
       });
 
-      window.clearTimeout(timeout);
       setServerState(res.ok ? "ready" : "error");
     } catch {
       setServerState("error");
+    } finally {
+      window.clearTimeout(timeout);
     }
   }, []);
 
@@ -214,20 +210,17 @@ export default function SmartOpsPage() {
         signal: controller.signal,
       });
 
-      if (res.ok) {
-        setIsFileIngested(true);
-      }
-
       const data = await res.json();
+      const requestFailed = !res.ok || data.status === "error";
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: data.answer || data.error || "No response received.",
+        content: data.answer || data.error || data.detail || "No response received.",
         engine: data.engine_used as Engine,
         sources: data.sources,
         chunks_used: data.chunks_used,
-        error: data.status === "error",
+        error: requestFailed,
         timestamp: new Date(),
       };
 
@@ -237,6 +230,9 @@ export default function SmartOpsPage() {
             ? {
                 ...s,
                 messages: [...s.messages, assistantMessage],
+                // Keep failed uploads attached for retry, and update only
+                // the workspace that sent this request.
+                isFileIngested: s.isFileIngested || (!requestFailed && s.uploadedFile === uploadedFile && !!uploadedFile),
                 loading: false,
                 displayName:
                   !s.uploadedFile && isFirstQuery

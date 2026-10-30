@@ -66,6 +66,18 @@ SmartOps is a full-stack AI operations assistant that combines tabular CSV analy
 
 ## How to run locally
 
+### Availability and deployment checks
+
+- Use `/api/status` for API liveness and the Render health check path. It stays
+  available when PDF storage is down, so chat and CSV analysis can still run.
+- `/health` is a dependency diagnostic: it returns 503 when Qdrant is unreachable.
+  A 503 here does not mean the entire API is offline.
+- PDF ingestion and search require the configured Qdrant Cloud cluster to be
+  running and reachable. If both 443 and 6333 reset connections, check the cluster
+  status and endpoint in Qdrant Cloud before changing application settings.
+
+Run backend regression checks from `backend/` with `python -m unittest discover -s tests`.
+
 ### Backend
 1. Start Docker Desktop.
 2. From `backend/`:
